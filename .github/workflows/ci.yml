@@ -135,6 +135,38 @@ jobs:
             backend/coverage.xml
             frontend/coverage/**
 
+  compose-smoke:
+    name: Compose live smoke
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Compose live smoke (loopback boundaries)
+        run: |
+          set -euo pipefail
+          cp .env.example .env
+          python3 scripts/ensure_local_auth_env.py
+          # Confirm token length without printing the secret.
+          python3 - <<'PY'
+          from pathlib import Path
+
+          min_len = 50
+          token = None
+          for line in Path(".env").read_text(encoding="utf-8").splitlines():
+              if line.startswith("LOCAL_AUTH_TOKEN="):
+                  token = line.split("=", 1)[1].strip().strip('"').strip("'")
+                  break
+          if token is None:
+              raise SystemExit("LOCAL_AUTH_TOKEN missing from .env after ensure_local_auth_env.py")
+          if len(token) < min_len:
+              raise SystemExit(
+                  f"LOCAL_AUTH_TOKEN must be at least {min_len} characters (got {len(token)})"
+              )
+          print(f"LOCAL_AUTH_TOKEN length OK ({len(token)} chars)")
+          PY
+          python3 scripts/compose_smoke_check.py --live
+
   installer:
     name: Installer (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
@@ -297,6 +329,8 @@ jobs:
           LOG_DIR="$XDG_STATE_HOME/openclaw-mission-control-install"
           if [ -f "$LOG_DIR/backend.pid" ]; then kill "$(cat "$LOG_DIR/backend.pid")" || true; fi
           if [ -f "$LOG_DIR/frontend.pid" ]; then kill "$(cat "$LOG_DIR/frontend.pid")" || true; fi
+          # Local --db-mode docker starts db with compose.loopback-db.yml; include it on teardown.
+          docker compose -f compose.yml -f compose.loopback-db.yml --env-file .env down -v --remove-orphans || true
           docker compose -f compose.yml --env-file .env down -v --remove-orphans || true
 
       - name: Cleanup macOS PostgreSQL

@@ -652,6 +652,31 @@ wait_for_http() {
   return 1
 }
 
+# Wait until Compose Postgres is healthy (and optionally reachable on loopback).
+wait_for_compose_db() {
+  local compose_args=("$@")
+  local timeout_seconds=90
+  local i
+  local status=""
+
+  for ((i = 1; i <= timeout_seconds; i++)); do
+    status="$(docker_compose "${compose_args[@]}" ps --status running --format '{{.Health}}' db 2>/dev/null || true)"
+    if [[ "$status" == "healthy" ]]; then
+      info "Compose Postgres is healthy"
+      return 0
+    fi
+    # Fallback when Health column is empty: pg_isready inside the container.
+    if docker_compose "${compose_args[@]}" exec -T db pg_isready -U postgres >/dev/null 2>&1; then
+      info "Compose Postgres is ready (pg_isready)"
+      return 0
+    fi
+    sleep 1
+  done
+
+  warn "Timed out waiting for Compose Postgres to become healthy"
+  return 1
+}
+
 start_local_services() {
   local backend_port="$1"
   local frontend_port="$2"
@@ -892,15 +917,27 @@ SUMMARY
   ensure_file_from_example "$REPO_ROOT/frontend/.env" "$REPO_ROOT/frontend/.env.example"
 
   if [[ "$db_mode" == "docker" ]]; then
+    local postgres_port="5432"
+    local loopback_db_compose="$REPO_ROOT/compose.loopback-db.yml"
+    local -a db_compose_args
+
     upsert_env_value "$REPO_ROOT/.env" "POSTGRES_DB" "mission_control"
     upsert_env_value "$REPO_ROOT/.env" "POSTGRES_USER" "postgres"
     upsert_env_value "$REPO_ROOT/.env" "POSTGRES_PASSWORD" "postgres"
-    upsert_env_value "$REPO_ROOT/.env" "POSTGRES_PORT" "5432"
+    upsert_env_value "$REPO_ROOT/.env" "POSTGRES_PORT" "$postgres_port"
 
-    database_url="postgresql+psycopg://postgres:postgres@localhost:5432/mission_control"
+    # Host-local backend needs loopback PG publish. Default compose.yml keeps
+    # Postgres internal-only (D9); optional compose.loopback-db.yml binds
+    # 127.0.0.1 only — never a wildcard host publish.
+    if [[ ! -f "$loopback_db_compose" ]]; then
+      die "Missing $loopback_db_compose (required for --db-mode docker hybrid bring-up)"
+    fi
+    db_compose_args=(-f compose.yml -f compose.loopback-db.yml --env-file .env)
+    database_url="postgresql+psycopg://postgres:postgres@127.0.0.1:${postgres_port}/mission_control"
 
-    info "Starting PostgreSQL via Docker..."
-    docker_compose -f compose.yml --env-file .env up -d db
+    info "Starting PostgreSQL via Docker (loopback-only host publish for hybrid local mode)..."
+    docker_compose "${db_compose_args[@]}" up -d db
+    wait_for_compose_db "${db_compose_args[@]}" || die "Compose Postgres did not become ready"
   fi
 
   upsert_env_value "$REPO_ROOT/backend/.env" "ENVIRONMENT" "prod"

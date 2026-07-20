@@ -17,19 +17,31 @@
 - Upstream movement is never automatic.
 - Any upstream update requires a new implementation card, an exact candidate SHA, compatibility validation, and Human approval before adoption.
 
-## Initial Divergence
+## Divergence Summary
 
-The repository is seeded from the exact pinned upstream commit above.
+### Checkpoint 1
 
-Authorized initial divergence for Checkpoint 1 is limited to this `UPSTREAM.md` file and repository metadata required to establish the project-owned public fork. No runtime, UI, API, authentication, Docker, GitHub adapter, workflow-record, exporter, database, or host-integration behavior is changed in this checkpoint.
+Authorized initial divergence was limited to this `UPSTREAM.md` file and repository metadata required to establish the project-owned public fork. No runtime, UI, API, authentication, Docker, GitHub adapter, workflow-record, exporter, database, or host-integration behavior was changed in Checkpoint 1.
+
+### Checkpoint 2 (Safety and Runtime Boundary)
+
+Authorized divergence for Checkpoint 2 (Issue #144 ACs 5–9) is limited to safety/runtime boundary work:
+
+- Hard-disable inherited mutation/write HTTP routes with fail-closed startup (`MUTATIONS_HARD_DISABLED`, ADR-23 D8)
+- Compose loopback publish for frontend/backend; remove default PostgreSQL/Redis host ports; optional `compose.loopback-db.yml` (127.0.0.1 only) for hybrid `install.sh --db-mode docker`; in-container listen on `0.0.0.0` (ADR-23 D7 / design D9)
+- Local-auth ≥50-character token generation path into ignored `.env` files when Clerk is unconfigured
+- Isolation proofs for bring-up paths (no GitHub API client; no sim / `~/.openclaw` mounts or bring-up references)
+- Tests and compose smoke checks for the above
+
+No GitHub adapter, workflow-record, projection schema, UI feature, or host-exporter work is included. Upstream pin SHA is unchanged.
 
 ## Compatibility Result
 
-- Result: `BOOTSTRAP_PIN_VERIFIED`
-- Verified exact upstream commit: `75eb8b0894803e48891a8a92b564c25fb126f2ea`
-- Verification method:
-  - `git rev-parse main`
-  - `git merge-base --is-ancestor 75eb8b0894803e48891a8a92b564c25fb126f2ea main`
-  - remote URL inspection for `origin` and `upstream`
-- Runtime compatibility testing: not applicable to Checkpoint 1
-- Next required work: Issue #144 Checkpoint 2, only after Human approval
+- Result: `CP2_SAFETY_RUNTIME_BOUNDARY`
+- Verified exact upstream pin (unchanged): `75eb8b0894803e48891a8a92b564c25fb126f2ea`
+- Checkpoint 2 validation focus:
+  - mutation/write route hard-disable + fail-closed configuration
+  - Compose loopback FE/BE and internal-only PG/Redis
+  - local-auth token generation (≥50 chars)
+  - isolation proofs on bring-up paths
+- Next required work: Issue #144 review/closeout for Slice 1 remaining ACs, then separate cards for Slice 2–5
