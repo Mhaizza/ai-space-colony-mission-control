@@ -14,12 +14,14 @@ from pydantic import ValidationError
 from app.core.auth_mode import AuthMode
 from app.core.config import Settings
 from app.core.mutation_guard import (
+    MUTATION_ALLOWLIST,
     MUTATIONS_DISABLED_CODE,
     MutationHardDisableMiddleware,
     enforce_mutations_hard_disabled,
     inventory_mutating_routes,
 )
 from app.main import app
+from app.mission.types import MANUAL_REFRESH_ALLOWLIST_ENTRY
 
 BASE_URL = "http://localhost:8000"
 VALID_LOCAL_TOKEN = "a" * 50
@@ -131,12 +133,19 @@ def test_main_app_inventories_mutating_routes_and_blocks_them(
 
 
 def test_every_inherited_mutating_route_is_inert(main_client: TestClient) -> None:
-    """AC5: every inherited mutation/write route returns no action capability."""
+    """AC5: every inherited mutation/write route returns no action capability.
+
+    ADR-23 D8 / Slice 3: exactly one allowlisted exception exists —
+    POST /api/v1/mission/refresh (read-only outbound sync trigger).
+    """
     mutating = inventory_mutating_routes(app)
     assert mutating, "expected inherited mutating routes to still be registered"
+    assert MUTATION_ALLOWLIST == frozenset({MANUAL_REFRESH_ALLOWLIST_ENTRY})
 
     failures: list[str] = []
     for method, path in mutating:
+        if (method, path) in MUTATION_ALLOWLIST:
+            continue
         request_path = path
         for part in path.split("/"):
             if part.startswith("{") and part.endswith("}"):

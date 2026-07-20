@@ -28,6 +28,7 @@ dependencies = [
     "redis==6.3.0",
     "rq==2.6.0",
     "cryptography==45.0.7",
+    "httpx==0.28.1",
 ]
 
 [project.optional-dependencies]

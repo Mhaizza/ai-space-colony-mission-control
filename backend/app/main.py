@@ -24,6 +24,7 @@ from app.api.boards import router as boards_router
 from app.api.gateway import router as gateway_router
 from app.api.gateways import router as gateways_router
 from app.api.metrics import router as metrics_router
+from app.api.mission import router as mission_router
 from app.api.organizations import router as organizations_router
 from app.api.skills_marketplace import router as skills_marketplace_router
 from app.api.souls_directory import router as souls_directory_router
@@ -41,7 +42,12 @@ from app.core.mutation_guard import (
 from app.core.rate_limit import validate_rate_limit_redis
 from app.core.rate_limit_backend import RateLimitBackend
 from app.core.security_headers import SecurityHeadersMiddleware
-from app.db.session import init_db
+from app.db.session import async_session_maker, init_db
+from app.mission.github_client import GitHubReadClient
+from app.mission.polling import PollingScheduler
+from app.mission.principal_registry import parse_principal_registry_json
+from app.mission.probes import RepoProbeTarget, run_startup_probes
+from app.mission.sync import GitHubSyncService, SyncConfig
 from app.schemas.health import HealthStatusResponse
 
 if TYPE_CHECKING:
@@ -77,6 +83,13 @@ OPENAPI_TAGS = [
     {
         "name": "metrics",
         "description": "Aggregated operational and board analytics metrics endpoints.",
+    },
+    {
+        "name": "mission",
+        "description": (
+            "Read-only Mission Control GitHub adapter endpoints "
+            "(manual refresh invokes outbound sync only)."
+        ),
     },
     {
         "name": "organizations",
@@ -453,10 +466,82 @@ async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
         logger.info("app.lifecycle.rate_limit backend=redis")
     else:
         logger.info("app.lifecycle.rate_limit backend=memory")
+
+    poller = None
+    if settings.github_adapter_enabled:
+        client = GitHubReadClient(token=settings.github_pat)
+        try:
+            if settings.github_run_startup_probes:
+                repos = [
+                    RepoProbeTarget(
+                        qualifier="self",
+                        owner=settings.github_self_owner,
+                        repo=settings.github_self_repo,
+                    )
+                ]
+                if settings.github_mission_control_owner and settings.github_mission_control_repo:
+                    repos.append(
+                        RepoProbeTarget(
+                            qualifier="mission-control",
+                            owner=settings.github_mission_control_owner,
+                            repo=settings.github_mission_control_repo,
+                        )
+                    )
+                await run_startup_probes(
+                    client,
+                    project_owner=settings.github_project_owner,
+                    project_number=settings.github_project_number,
+                    repos=repos,
+                )
+                logger.info("app.lifecycle.github_probes.ok")
+
+            registry = parse_principal_registry_json(settings.mc_principal_registry_json)
+            sync_config = SyncConfig(
+                project_owner=settings.github_project_owner,
+                project_number=settings.github_project_number,
+                self_owner=settings.github_self_owner,
+                self_repo=settings.github_self_repo,
+                mission_control_owner=settings.github_mission_control_owner or None,
+                mission_control_repo=settings.github_mission_control_repo or None,
+                mission_control_enabled=bool(
+                    settings.github_mission_control_owner
+                    and settings.github_mission_control_repo
+                ),
+            )
+
+            async def _poll_tick() -> None:
+                service = GitHubSyncService(
+                    client=client,
+                    registry=registry,
+                    config=sync_config,
+                    token_for_redaction=settings.github_pat,
+                )
+                async with async_session_maker() as session:
+                    await service.run(session)
+
+            poller = PollingScheduler(
+                interval_seconds=settings.github_poll_interval_seconds,
+                tick=_poll_tick,
+            )
+            poller.start()
+            fastapi_app.state.github_client = client
+            fastapi_app.state.github_poller = poller
+        except Exception:
+            await client.aclose()
+            raise
+    else:
+        logger.info("app.lifecycle.github_adapter.disabled")
+
     logger.info("app.lifecycle.started")
     try:
         yield
     finally:
+        poller_obj = getattr(fastapi_app.state, "github_poller", None)
+        if poller_obj is not None:
+            await poller_obj.stop()
+        client_obj = getattr(fastapi_app.state, "github_client", None)
+        if client_obj is not None:
+            await client_obj.aclose()
         logger.info("app.lifecycle.stopped")
 
 
@@ -557,6 +642,7 @@ api_v1.include_router(activity_router)
 api_v1.include_router(gateway_router)
 api_v1.include_router(gateways_router)
 api_v1.include_router(metrics_router)
+api_v1.include_router(mission_router)
 api_v1.include_router(organizations_router)
 api_v1.include_router(souls_directory_router)
 api_v1.include_router(skills_marketplace_router)
