@@ -43,6 +43,10 @@ class Settings(BaseSettings):
     auth_mode: AuthMode
     local_auth_token: str = ""
 
+    # ADR-23 D8: inherited write/action routes must remain hard-disabled.
+    # Startup fails closed when mutating routes are present and this is false.
+    mutations_hard_disabled: bool = True
+
     # Clerk auth (auth only; roles stored in DB)
     clerk_secret_key: str = ""
     clerk_api_url: str = "https://api.clerk.com"
@@ -108,6 +112,12 @@ class Settings(BaseSettings):
                 raise ValueError(
                     "LOCAL_AUTH_TOKEN must be at least 50 characters and non-placeholder when AUTH_MODE=local.",
                 )
+
+        if not self.mutations_hard_disabled:
+            raise ValueError(
+                "MUTATIONS_HARD_DISABLED must be true. Write/action routes cannot be "
+                "enabled without an ADR-23 revision (D8).",
+            )
 
         base_url = self.base_url.strip()
         if not base_url:

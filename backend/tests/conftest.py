@@ -14,3 +14,4 @@ if str(ROOT) not in sys.path:
 os.environ["AUTH_MODE"] = "local"
 os.environ["LOCAL_AUTH_TOKEN"] = "test-local-token-0123456789-0123456789-0123456789x"
 os.environ["BASE_URL"] = "http://localhost:8000"
+os.environ["MUTATIONS_HARD_DISABLED"] = "true"

@@ -1,0 +1,12 @@
+# Optional override: publish Postgres to loopback only.
+#
+# Used by install.sh hybrid bring-up (`--mode local --db-mode docker`) so a
+# host-local backend can reach Compose Postgres at 127.0.0.1 without making
+# host PG publish part of the default `compose.yml` stack (ADR-23 D7 / design D9).
+#
+# Default `docker compose -f compose.yml up` does NOT include this file.
+# Redis remains internal-only; do not add a Redis host publish here.
+services:
+  db:
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"

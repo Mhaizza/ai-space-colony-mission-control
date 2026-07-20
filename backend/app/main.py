@@ -34,6 +34,10 @@ from app.api.users import router as users_router
 from app.core.config import settings
 from app.core.error_handling import install_error_handling
 from app.core.logging import configure_logging, get_logger
+from app.core.mutation_guard import (
+    MutationHardDisableMiddleware,
+    enforce_mutations_hard_disabled,
+)
 from app.core.rate_limit import validate_rate_limit_redis
 from app.core.rate_limit_backend import RateLimitBackend
 from app.core.security_headers import SecurityHeadersMiddleware
@@ -431,12 +435,17 @@ class MissionControlFastAPI(FastAPI):
 
 
 @asynccontextmanager
-async def lifespan(_: FastAPI) -> AsyncIterator[None]:
+async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
     """Initialize application resources before serving requests."""
     logger.info(
-        "app.lifecycle.starting environment=%s db_auto_migrate=%s",
+        "app.lifecycle.starting environment=%s db_auto_migrate=%s mutations_hard_disabled=%s",
         settings.environment,
         settings.db_auto_migrate,
+        settings.mutations_hard_disabled,
+    )
+    enforce_mutations_hard_disabled(
+        fastapi_app,
+        hard_disabled=settings.mutations_hard_disabled,
     )
     await init_db()
     if settings.rate_limit_backend == RateLimitBackend.REDIS:
@@ -478,6 +487,10 @@ app.add_middleware(
     x_frame_options=settings.security_header_x_frame_options,
     referrer_policy=settings.security_header_referrer_policy,
     permissions_policy=settings.security_header_permissions_policy,
+)
+app.add_middleware(
+    MutationHardDisableMiddleware,
+    enabled=settings.mutations_hard_disabled,
 )
 install_error_handling(app)
 

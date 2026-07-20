@@ -47,4 +47,5 @@ USER appuser
 
 EXPOSE 3000
 
-CMD ["npm", "run", "start"]
+# Listen on all container interfaces; Compose publishes only 127.0.0.1 on the host.
+CMD ["npm", "run", "start", "--", "--hostname", "0.0.0.0", "--port", "3000"]
