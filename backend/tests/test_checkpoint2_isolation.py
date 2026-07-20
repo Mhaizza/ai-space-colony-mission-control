@@ -81,8 +81,8 @@ def test_compose_publishes_only_loopback_frontend_and_backend() -> None:
 
     assert re.search(r"(?m)^\s+ports:\s*$", db_block) is None
     assert re.search(r"(?m)^\s+ports:\s*$", redis_block) is None
-    assert '127.0.0.1:${BACKEND_PORT:-8000}:8000' in backend_block
-    assert '127.0.0.1:${FRONTEND_PORT:-3000}:3000' in frontend_block
+    assert "127.0.0.1:${BACKEND_PORT:-8000}:8000" in backend_block
+    assert "127.0.0.1:${FRONTEND_PORT:-3000}:3000" in frontend_block
     assert re.search(r'(?m)^\s+-\s+"?\d+:\d+"?\s*$', backend_block) is None
     assert re.search(r'(?m)^\s+-\s+"?\d+:\d+"?\s*$', frontend_block) is None
 
@@ -90,7 +90,7 @@ def test_compose_publishes_only_loopback_frontend_and_backend() -> None:
 def test_loopback_db_override_is_loopback_only() -> None:
     assert LOOPBACK_DB_COMPOSE_PATH.is_file()
     text = LOOPBACK_DB_COMPOSE_PATH.read_text(encoding="utf-8")
-    assert '127.0.0.1:${POSTGRES_PORT:-5432}:5432' in text
+    assert "127.0.0.1:${POSTGRES_PORT:-5432}:5432" in text
     assert re.search(r'(?m)^\s+-\s+"?\d+:\d+"?\s*$', text) is None
     assert "6379" not in text
 
@@ -216,9 +216,7 @@ def test_no_github_api_client_in_bring_up_paths() -> None:
         for pattern in GITHUB_CLIENT_PATTERNS:
             if pattern.search(text):
                 violations.append(f"{path.relative_to(REPO_ROOT)} matches {pattern.pattern}")
-    assert not violations, "GitHub API client surface must remain absent:\n" + "\n".join(
-        violations
-    )
+    assert not violations, "GitHub API client surface must remain absent:\n" + "\n".join(violations)
 
 
 def test_no_sim_or_openclaw_runtime_refs_in_bring_up_paths() -> None:

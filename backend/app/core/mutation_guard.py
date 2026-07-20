@@ -15,8 +15,7 @@ if TYPE_CHECKING:  # pragma: no cover
 MUTATING_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
 MUTATIONS_DISABLED_CODE = "mutations_hard_disabled"
 MUTATIONS_DISABLED_MESSAGE = (
-    "Write/action routes are hard-disabled (ADR-23 D8). "
-    "No action capability is available."
+    "Write/action routes are hard-disabled (ADR-23 D8). " "No action capability is available."
 )
 
 
