@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel, Field
 from sqlmodel.ext.asyncio.session import AsyncSession
 
@@ -12,13 +12,23 @@ from app.api.deps import require_user_auth
 from app.core.auth import AuthContext
 from app.core.config import settings
 from app.db.session import get_session
+from app.mission import read_service
 from app.mission.github_client import GitHubReadClient
 from app.mission.principal_registry import parse_principal_registry_json
 from app.mission.sync import GitHubSyncService, SyncConfig
+from app.schemas.mission import (
+    MissionOverview,
+    MissionQuarantineSummary,
+    MissionWorkflowSummary,
+)
 
 router = APIRouter(prefix="/mission", tags=["mission"])
 AUTH_DEP = Depends(require_user_auth)
 SESSION_DEP = Depends(get_session)
+
+QUARANTINE_LIMIT_QUERY = Query(default=50, ge=1, le=200)
+CARD_LIMIT_QUERY = Query(default=100, ge=1, le=500)
+RECORD_LIMIT_QUERY = Query(default=100, ge=1, le=500)
 
 
 class MissionRefreshResponse(BaseModel):
@@ -90,6 +100,78 @@ async def refresh_mission_projection(
         tombstoned=result.tombstoned,
         errors=result.errors,
         effective_assignments=assignments,
+    )
+
+
+@router.get(
+    "/overview",
+    response_model=MissionOverview,
+    summary="Read-only Mission Control dashboard overview",
+    description=(
+        "Composite read-only snapshot derived from the Slice 3 projection tables: "
+        "adapter/sync health, projection counts, quarantine visibility, and a "
+        "minimal workflow roll-up. Reads only; never touches GitHub (ADR-23)."
+    ),
+)
+async def mission_overview(
+    quarantine_limit: int = QUARANTINE_LIMIT_QUERY,
+    card_limit: int = CARD_LIMIT_QUERY,
+    record_limit: int = RECORD_LIMIT_QUERY,
+    auth: AuthContext = AUTH_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> MissionOverview:
+    """Return the composite read-only dashboard snapshot."""
+    _ = auth
+    return await read_service.get_overview(
+        session,
+        quarantine_limit=quarantine_limit,
+        card_limit=card_limit,
+        record_limit=record_limit,
+    )
+
+
+@router.get(
+    "/quarantine",
+    response_model=MissionQuarantineSummary,
+    summary="Read-only quarantine visibility",
+    description=(
+        "Quarantine totals, per-reason counts, and a recent-entry window from the "
+        "mc_quarantine projection table. Diagnostic payloads are intentionally "
+        "excluded from the read surface."
+    ),
+)
+async def mission_quarantine(
+    limit: int = QUARANTINE_LIMIT_QUERY,
+    auth: AuthContext = AUTH_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> MissionQuarantineSummary:
+    """Return the quarantine summary for dashboard visibility."""
+    _ = auth
+    return await read_service.get_quarantine_summary(session, limit=limit)
+
+
+@router.get(
+    "/workflow",
+    response_model=MissionWorkflowSummary,
+    summary="Read-only workflow and cards summary",
+    description=(
+        "Minimal (v0.1) cards + workflow-record roll-up derived from projected "
+        "project items and ai-workflow-record:v1 comments. Payload-local parsing "
+        "only; assignment authority derivation is intentionally excluded."
+    ),
+)
+async def mission_workflow(
+    card_limit: int = CARD_LIMIT_QUERY,
+    record_limit: int = RECORD_LIMIT_QUERY,
+    auth: AuthContext = AUTH_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> MissionWorkflowSummary:
+    """Return the minimal workflow/cards summary."""
+    _ = auth
+    return await read_service.get_workflow_summary(
+        session,
+        card_limit=card_limit,
+        record_limit=record_limit,
     )
 
 
