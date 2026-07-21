@@ -770,6 +770,180 @@ async def test_workflow_runs_malformed_element_marks_partial() -> None:
     assert existing.tombstoned is False
 
 
+# --------------------------------------------------------------------------- #
+# Blocking issue: source identity is a closed validated contract. Malformed
+# identity on commit status / workflow runs marks the partition PARTIAL and is
+# never upserted with a synthetic id.
+# --------------------------------------------------------------------------- #
+
+
+def _wrapped_single_page(key: str, elements: list[Any]) -> Any:
+    def rest_handler(_path: str, params: dict[str, Any]) -> FakeResp:
+        page = params.get("page", 1)
+        if page == 1:
+            return FakeResp(200, {key: elements})
+        return FakeResp(200, {key: []})
+
+    return rest_handler
+
+
+def _added_source_ids(session: FakeSession) -> list[str]:
+    return [row.source_id for row in session.added if hasattr(row, "source_id")]
+
+
+_COMMIT_STATUS_MALFORMED = [
+    pytest.param({"context": "ci"}, id="missing-node_id-missing-id"),
+    pytest.param({"context": "ci", "id": None}, id="missing-node_id-invalid-id"),
+    pytest.param({}, id="empty-identity"),
+    pytest.param({"node_id": 12345}, id="malformed-identity-type"),
+    pytest.param({"id": 7}, id="missing-context-component"),
+]
+
+
+@pytest.mark.parametrize("malformed", _COMMIT_STATUS_MALFORMED)
+@pytest.mark.asyncio
+async def test_commit_status_malformed_identity_marks_partial_no_synthetic_id(
+    malformed: dict[str, Any],
+) -> None:
+    head = "d" * 40
+    handler = _wrapped_single_page("statuses", [{"node_id": "S1", "context": "ci"}, malformed])
+    session = FakeSession()
+    service = _service(FakeClient(rest_handler=handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_commit_status(
+        session, "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+
+    partition = _commit_status_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_COMMIT_STATUS.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+    # Valid sibling still observed and projected.
+    assert "S1" in reconciler.touch(src, partition).observed_ids
+    ids = _added_source_ids(session)
+    assert ids == ["S1"]
+    # No synthetic identity from incomplete data (e.g. status:<sha>:None:None).
+    assert all("None" not in sid for sid in ids)
+    # Existing row is never tombstoned because the partition became partial.
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+    assert recon_result.tombstoned == 0
+
+
+@pytest.mark.asyncio
+async def test_commit_status_valid_fallback_still_imports() -> None:
+    """Regression: a status without node_id but with id+context still imports."""
+    head = "d" * 40
+    handler = _wrapped_single_page("statuses", [{"context": "ci", "id": 7}])
+    session = FakeSession()
+    service = _service(FakeClient(rest_handler=handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_commit_status(
+        session, "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+
+    partition = _commit_status_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_COMMIT_STATUS.value
+    assert not result.errors
+    assert _is_reconcilable(reconciler, src, partition)
+    assert _added_source_ids(session) == [f"status:{head}:ci:7"]
+    assert f"status:{head}:ci:7" in reconciler.touch(src, partition).observed_ids
+
+
+_WORKFLOW_RUN_MALFORMED = [
+    pytest.param({"foo": "bar"}, id="missing-node_id-missing-id"),
+    pytest.param({"id": None}, id="invalid-id"),
+    pytest.param({}, id="empty-identity"),
+    pytest.param({"node_id": 999}, id="malformed-identity-type"),
+]
+
+
+@pytest.mark.parametrize("malformed", _WORKFLOW_RUN_MALFORMED)
+@pytest.mark.asyncio
+async def test_workflow_run_malformed_identity_marks_partial_no_synthetic_id(
+    malformed: dict[str, Any],
+) -> None:
+    head = "a" * 40
+    handler = _wrapped_single_page("workflow_runs", [{"node_id": "WR1"}, malformed])
+    session = FakeSession()
+    service = _service(FakeClient(rest_handler=handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_workflow_runs(
+        session, "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+
+    partition = _workflow_runs_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_WORKFLOW_RUN.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+    assert "WR1" in reconciler.touch(src, partition).observed_ids
+    ids = _added_source_ids(session)
+    assert ids == ["WR1"]
+    # No synthetic identity such as workflow_run:None.
+    assert all("None" not in sid for sid in ids)
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+    assert recon_result.tombstoned == 0
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_valid_fallback_still_imports() -> None:
+    """Regression: a run without node_id but with a valid id still imports."""
+    head = "a" * 40
+    handler = _wrapped_single_page("workflow_runs", [{"id": 9}])
+    session = FakeSession()
+    service = _service(FakeClient(rest_handler=handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_workflow_runs(
+        session, "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+
+    partition = _workflow_runs_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_WORKFLOW_RUN.value
+    assert not result.errors
+    assert _is_reconcilable(reconciler, src, partition)
+    assert _added_source_ids(session) == ["workflow_run:9"]
+    assert "workflow_run:9" in reconciler.touch(src, partition).observed_ids
+
+
+@pytest.mark.asyncio
+async def test_workflow_run_reconciliation_tombstones_absent_in_complete_partition() -> None:
+    """Regression: a clean workflow-run read still reconciles/tombstones."""
+    head = "a" * 40
+    handler = _wrapped_single_page("workflow_runs", [{"node_id": "WR1"}])
+    service = _service(FakeClient(rest_handler=handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_workflow_runs(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+
+    partition = _workflow_runs_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_WORKFLOW_RUN.value
+    assert not result.errors
+    assert _is_reconcilable(reconciler, src, partition)
+
+    observed = FakeRow("WR1")
+    stale = FakeRow("OLD")
+
+    async def fake_load(_session: Any, st: str, pk: str) -> list[Any]:
+        return [observed, stale] if (st, pk) == (src, partition) else []
+
+    service._load_partition_rows = fake_load  # type: ignore[method-assign]
+    recon_result = SyncResult(ok=True, partial=False)
+    await service._reconcile(FakeSession(), reconciler, recon_result)  # type: ignore[arg-type]
+    assert observed.tombstoned is False
+    assert stale.tombstoned is True
+
+
 @pytest.mark.asyncio
 async def test_issue_malformed_body_marks_partition_partial() -> None:
     def rest_handler(_path: str, _params: dict[str, Any]) -> FakeResp:

@@ -23,6 +23,7 @@ from app.mission.github_client import PROJECT_ITEMS_QUERY, GitHubReadClient
 from app.mission.principal_registry import PrincipalRegistry
 from app.mission.reconciliation import PartitionReconciler, select_tombstones
 from app.mission.redaction import scrub_mapping
+from app.mission.source_identity import commit_status_identity, workflow_run_identity
 from app.mission.types import QuarantineReason, SourceType
 from app.mission.validation import (
     CandidateRecord,
@@ -694,11 +695,17 @@ class GitHubSyncService:
             if not isinstance(st, dict):
                 malformed = True
                 continue
-            sid = st.get("node_id") or f"status:{head_sha}:{st.get('context')}:{st.get('id')}"
+            sid = commit_status_identity(st, head_sha=head_sha)
+            if sid is None:
+                # Source identity is a closed contract: an element without a
+                # fully defined identity is malformed, so mark the partition
+                # partial and never upsert a synthetic id.
+                malformed = True
+                continue
             await self._upsert_projection(
                 session,
                 source_type=source_type,
-                source_id=str(sid),
+                source_id=sid,
                 source_url=st.get("target_url"),
                 source_updated_at=_parse_gh_time(st.get("updated_at")),
                 partition_key=partition,
@@ -818,11 +825,15 @@ class GitHubSyncService:
             if not isinstance(run, dict):
                 malformed = True
                 continue
-            sid = run.get("node_id") or f"workflow_run:{run.get('id')}"
+            sid = workflow_run_identity(run)
+            if sid is None:
+                # Closed identity contract: no synthetic id from incomplete data.
+                malformed = True
+                continue
             await self._upsert_projection(
                 session,
                 source_type=source_type,
-                source_id=str(sid),
+                source_id=sid,
                 source_url=run.get("html_url"),
                 source_updated_at=_parse_gh_time(run.get("updated_at")),
                 partition_key=partition,
