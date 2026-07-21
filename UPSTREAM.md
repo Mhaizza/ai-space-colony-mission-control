@@ -47,12 +47,35 @@ Authorized divergence for Slice 3 adds the server-only read-only GitHub adapter:
 
 Upstream pin SHA is unchanged.
 
+### Slice 3.5 (Read-Only Mission Control Dashboard — Issue #149)
+
+Authorized divergence for Slice 3.5 adds the read-only Mission Control
+dashboard and API layer on top of the Slice 3 projection pipeline:
+
+- Three read-only API endpoints: `GET /api/v1/mission/overview`,
+  `GET /api/v1/mission/quarantine`, `GET /api/v1/mission/workflow`
+- `MissionOverview` / `MissionQuarantineSummary` / `MissionWorkflowSummary`
+  response schemas derived from Slice 3 projection tables (no new migrations)
+- Frontend dashboard at `/mission`; Orval client regenerated to match updated
+  OpenAPI schema
+- `MUTATIONS_HARD_DISABLED=true` preserved; `MutationHardDisableMiddleware`
+  allowlist unchanged (sole exception: `POST /api/v1/mission/refresh`)
+- No GitHub mutations, no inbound webhooks, no new migrations
+
+Upstream pin SHA unchanged.
+
 ## Compatibility Result
 
-- Result: `SLICE3_READONLY_GITHUB_ADAPTER`
+- Result: `SLICE3_5_READONLY_DASHBOARD`
 - Verified exact upstream pin (unchanged): `75eb8b0894803e48891a8a92b564c25fb126f2ea`
-- Slice 3 validation focus:
-  - `mypy --strict` (project default)
-  - pytest for workflow/auth/quarantine/scope/mutation-allowlist/partial-read
+- Baseline commit: `06b01ab`
+- Slice 3.5 validation focus:
+  - `mypy --strict` (166 source files, no issues)
+  - pytest (607 passed, 1 xfailed)
+  - isort / black / flake8 clean
+  - TypeScript, ESLint, `next build` clean
+  - Read-only dashboard endpoints verified (401 unauthenticated, 200 authenticated)
+  - OpenAPI and Orval client synchronized
   - mutation hard-disable remains fail-closed except manual refresh
-- Next required work: Claude contract review + ChatGPT implementation review + Human approval of exact PR head; Slice 3.5 for rich projection/UI
+- Stabilization checkpoint: `docs/slice-3.5-stabilization.md`
+- Next required work: Slice 4 design review + Human approval; see `docs/slice-4-architecture-proposal.md`
