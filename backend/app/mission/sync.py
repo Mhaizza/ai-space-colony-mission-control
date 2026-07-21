@@ -40,6 +40,10 @@ from app.models.mc_projection import McProjectionRecord, McQuarantine, McSyncSta
 _PER_PAGE: Final[int] = 100
 _MAX_PAGES: Final[int] = 100
 
+# GraphQL pagination cap for the Projects v2 items connection. Exceeding it is a
+# partial read: a runaway/looping cursor must never let us tombstone a partition.
+_GRAPHQL_MAX_PAGES: Final[int] = 100
+
 
 @dataclass
 class SyncConfig:
@@ -333,8 +337,16 @@ class GitHubSyncService:
         partition = _project_partition(self._config.project_owner, self._config.project_number)
         source_type = SourceType.GITHUB_PROJECT_ITEM
         reconciler.touch(source_type.value, partition)
+        seen_cursors: set[str] = set()
+        page_count = 0
+        malformed = False
         try:
             while True:
+                page_count += 1
+                if page_count > _GRAPHQL_MAX_PAGES:
+                    result.errors.append("project items exceeded GraphQL page cap")
+                    reconciler.mark_partial(source_type.value, partition)
+                    return
                 response = await self._client.graphql(
                     PROJECT_ITEMS_QUERY,
                     {
@@ -362,6 +374,9 @@ class GitHubSyncService:
                     return
                 for node in items.get("nodes") or []:
                     if not isinstance(node, dict) or not node.get("id"):
+                        # A malformed element makes the whole enumeration untrustworthy;
+                        # keep valid siblings but never tombstone from a partial view.
+                        malformed = True
                         continue
                     await self._upsert_projection(
                         session,
@@ -377,7 +392,20 @@ class GitHubSyncService:
                 page = items.get("pageInfo") or {}
                 if not page.get("hasNextPage"):
                     break
-                after = page.get("endCursor")
+                cursor = page.get("endCursor")
+                if not isinstance(cursor, str) or not cursor:
+                    result.errors.append("project items hasNextPage without a valid endCursor")
+                    reconciler.mark_partial(source_type.value, partition)
+                    return
+                if cursor in seen_cursors:
+                    result.errors.append("project items returned a repeated endCursor")
+                    reconciler.mark_partial(source_type.value, partition)
+                    return
+                seen_cursors.add(cursor)
+                after = cursor
+            if malformed:
+                result.errors.append("project items contained malformed element(s)")
+                reconciler.mark_partial(source_type.value, partition)
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"project sync failed: {exc}")
             reconciler.mark_partial(source_type.value, partition)
@@ -443,7 +471,13 @@ class GitHubSyncService:
             result.errors.append(f"issue {number} status={response.status_code}")
             reconciler.mark_partial(SourceType.GITHUB_ISSUE.value, partition)
             return
-        body = response.json_body if isinstance(response.json_body, dict) else {}
+        if not isinstance(response.json_body, dict):
+            # A malformed element in the reconciled issue partition: keep siblings
+            # already observed this cycle live by refusing to reconcile the partition.
+            result.errors.append(f"issue {number} malformed body")
+            reconciler.mark_partial(SourceType.GITHUB_ISSUE.value, partition)
+            return
+        body = response.json_body
         await self._upsert_projection(
             session,
             source_type=SourceType.GITHUB_ISSUE,
@@ -475,7 +509,13 @@ class GitHubSyncService:
             result.errors.append(f"pull {number} status={response.status_code}")
             reconciler.mark_partial(SourceType.GITHUB_PULL_REQUEST.value, partition)
             return
-        body = response.json_body if isinstance(response.json_body, dict) else {}
+        if not isinstance(response.json_body, dict):
+            # A malformed element in the reconciled pull partition: keep siblings
+            # already observed this cycle live by refusing to reconcile the partition.
+            result.errors.append(f"pull {number} malformed body")
+            reconciler.mark_partial(SourceType.GITHUB_PULL_REQUEST.value, partition)
+            return
+        body = response.json_body
         head_sha = (body.get("head") or {}).get("sha") or content.get("headRefOid")
         await self._upsert_projection(
             session,
@@ -516,11 +556,14 @@ class GitHubSyncService:
             result.errors.append(f"issue comments {number} partial read")
             reconciler.mark_partial(source_type.value, partition)
             return
+        malformed = False
         for comment in comments:
             if not isinstance(comment, dict):
+                malformed = True
                 continue
             comment_node_id = comment.get("node_id")
             if not isinstance(comment_node_id, str):
+                malformed = True
                 continue
             await self._upsert_projection(
                 session,
@@ -533,6 +576,9 @@ class GitHubSyncService:
                 result=result,
                 reconciler=reconciler,
             )
+        if malformed:
+            result.errors.append(f"issue comments {number} contained malformed element(s)")
+            reconciler.mark_partial(source_type.value, partition)
 
     async def _sync_pr_reviews(
         self,
@@ -556,8 +602,10 @@ class GitHubSyncService:
             result.errors.append(f"reviews {number} partial read")
             reconciler.mark_partial(reviews_type.value, reviews_partition)
         else:
+            reviews_malformed = False
             for review in reviews:
                 if not isinstance(review, dict) or not isinstance(review.get("node_id"), str):
+                    reviews_malformed = True
                     continue
                 await self._upsert_projection(
                     session,
@@ -570,6 +618,9 @@ class GitHubSyncService:
                     result=result,
                     reconciler=reconciler,
                 )
+            if reviews_malformed:
+                result.errors.append(f"reviews {number} contained malformed element(s)")
+                reconciler.mark_partial(reviews_type.value, reviews_partition)
 
         comments_partition = _pr_review_comments_partition(owner, repo, number)
         comments_type = SourceType.GITHUB_PULL_REQUEST_REVIEW_COMMENT
@@ -583,8 +634,10 @@ class GitHubSyncService:
             result.errors.append(f"review comments {number} partial read")
             reconciler.mark_partial(comments_type.value, comments_partition)
             return
+        comments_malformed = False
         for comment in review_comments:
             if not isinstance(comment, dict) or not isinstance(comment.get("node_id"), str):
+                comments_malformed = True
                 continue
             await self._upsert_projection(
                 session,
@@ -597,6 +650,9 @@ class GitHubSyncService:
                 result=result,
                 reconciler=reconciler,
             )
+        if comments_malformed:
+            result.errors.append(f"review comments {number} contained malformed element(s)")
+            reconciler.mark_partial(comments_type.value, comments_partition)
 
     async def _sync_checks(
         self,
@@ -633,8 +689,10 @@ class GitHubSyncService:
             result.errors.append(f"commit status {head_sha[:12]} partial read")
             reconciler.mark_partial(source_type.value, partition)
             return
+        malformed = False
         for st in statuses:
             if not isinstance(st, dict):
+                malformed = True
                 continue
             sid = st.get("node_id") or f"status:{head_sha}:{st.get('context')}:{st.get('id')}"
             await self._upsert_projection(
@@ -648,6 +706,9 @@ class GitHubSyncService:
                 result=result,
                 reconciler=reconciler,
             )
+        if malformed:
+            result.errors.append(f"commit status {head_sha[:12]} contained malformed element(s)")
+            reconciler.mark_partial(source_type.value, partition)
 
     async def _sync_check_runs(
         self,
@@ -670,8 +731,10 @@ class GitHubSyncService:
             result.errors.append(f"check runs {head_sha[:12]} partial read")
             reconciler.mark_partial(source_type.value, partition)
             return
+        malformed = False
         for run in runs:
             if not isinstance(run, dict) or not isinstance(run.get("node_id"), str):
+                malformed = True
                 continue
             await self._upsert_projection(
                 session,
@@ -684,6 +747,9 @@ class GitHubSyncService:
                 result=result,
                 reconciler=reconciler,
             )
+        if malformed:
+            result.errors.append(f"check runs {head_sha[:12]} contained malformed element(s)")
+            reconciler.mark_partial(source_type.value, partition)
 
     async def _sync_check_suites(
         self,
@@ -706,8 +772,10 @@ class GitHubSyncService:
             result.errors.append(f"check suites {head_sha[:12]} partial read")
             reconciler.mark_partial(source_type.value, partition)
             return
+        malformed = False
         for suite in suites:
             if not isinstance(suite, dict) or not isinstance(suite.get("node_id"), str):
+                malformed = True
                 continue
             await self._upsert_projection(
                 session,
@@ -720,6 +788,9 @@ class GitHubSyncService:
                 result=result,
                 reconciler=reconciler,
             )
+        if malformed:
+            result.errors.append(f"check suites {head_sha[:12]} contained malformed element(s)")
+            reconciler.mark_partial(source_type.value, partition)
 
     async def _sync_workflow_runs(
         self,
@@ -742,8 +813,10 @@ class GitHubSyncService:
             result.errors.append(f"workflow runs {head_sha[:12]} partial read")
             reconciler.mark_partial(source_type.value, partition)
             return
+        malformed = False
         for run in runs:
             if not isinstance(run, dict):
+                malformed = True
                 continue
             sid = run.get("node_id") or f"workflow_run:{run.get('id')}"
             await self._upsert_projection(
@@ -757,6 +830,9 @@ class GitHubSyncService:
                 result=result,
                 reconciler=reconciler,
             )
+        if malformed:
+            result.errors.append(f"workflow runs {head_sha[:12]} contained malformed element(s)")
+            reconciler.mark_partial(source_type.value, partition)
 
     async def _derive_workflow_state(self, session: AsyncSession, result: SyncResult) -> None:
         """Parse/authorize/validate workflow records from projected issue comments."""

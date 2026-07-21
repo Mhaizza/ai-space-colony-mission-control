@@ -11,12 +11,21 @@ import pytest
 from app.mission.principal_registry import empty_principal_registry
 from app.mission.reconciliation import PartitionReconciler, select_tombstones
 from app.mission.sync import (
+    _GRAPHQL_MAX_PAGES,
     GitHubSyncService,
     SyncConfig,
     SyncResult,
     _array_extractor,
+    _check_runs_partition,
+    _check_suites_partition,
     _commit_status_partition,
     _issue_comments_partition,
+    _issue_partition,
+    _pr_review_comments_partition,
+    _pr_reviews_partition,
+    _project_partition,
+    _pull_partition,
+    _workflow_runs_partition,
     _wrapped_extractor,
 )
 from app.mission.types import SourceType
@@ -399,3 +408,408 @@ def test_wrapped_extractor_reads_nested_array() -> None:
     assert extract({"check_runs": [{"a": 1}]}) == [{"a": 1}]
     assert extract({"check_runs": "bad"}) is None
     assert extract(["not", "wrapped"]) is None
+
+
+# --------------------------------------------------------------------------- #
+# Blocking issue 1: malformed collection elements make the partition PARTIAL
+# and therefore never tombstone existing rows.
+# --------------------------------------------------------------------------- #
+
+
+def _is_reconcilable(reconciler: PartitionReconciler, source_type: str, partition_key: str) -> bool:
+    return (source_type, partition_key) in {
+        (p.source_type, p.partition_key) for p in reconciler.reconcilable_partitions()
+    }
+
+
+async def _reconcile_keeps_existing_row_live(
+    service: GitHubSyncService,
+    reconciler: PartitionReconciler,
+    source_type: str,
+    partition_key: str,
+) -> tuple[FakeRow, SyncResult]:
+    """Reconcile with an unobserved live row present; it must survive untouched.
+
+    This is the direct proof that a malformed element never tombstones an
+    existing source record: the partition is partial, so ``_reconcile`` skips it
+    entirely and the unobserved row stays live.
+    """
+    existing = FakeRow("EXISTING-LIVE", tombstoned=False)
+
+    async def fake_load(_session: Any, st: str, pk: str) -> list[Any]:
+        return [existing] if (st, pk) == (source_type, partition_key) else []
+
+    service._load_partition_rows = fake_load  # type: ignore[method-assign]
+    result = SyncResult(ok=True, partial=False)
+    await service._reconcile(FakeSession(), reconciler, result)  # type: ignore[arg-type]
+    return existing, result
+
+
+def _project_page(
+    nodes: list[Any],
+    *,
+    has_next: bool,
+    end_cursor: Any,
+) -> FakeResp:
+    return FakeResp(
+        200,
+        {
+            "data": {
+                "user": {
+                    "projectV2": {
+                        "id": "P1",
+                        "title": "t",
+                        "items": {
+                            "pageInfo": {"hasNextPage": has_next, "endCursor": end_cursor},
+                            "nodes": nodes,
+                        },
+                    }
+                }
+            }
+        },
+    )
+
+
+@pytest.mark.asyncio
+async def test_project_items_malformed_element_marks_partial_and_never_tombstones() -> None:
+    def graphql_handler(_query: str, _variables: dict[str, Any]) -> FakeResp:
+        return _project_page(
+            [{"id": "N1", "updatedAt": None}, {"missing": "id"}],
+            has_next=False,
+            end_cursor=None,
+        )
+
+    service = _service(FakeClient(graphql_handler=graphql_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_project_items(FakeSession(), result, reconciler)  # type: ignore[arg-type]
+
+    partition = _project_partition("Mhaizza", 4)
+    src = SourceType.GITHUB_PROJECT_ITEM.value
+    assert result.errors  # reported partial/failed
+    assert not _is_reconcilable(reconciler, src, partition)
+    # Valid sibling is still observed/preserved.
+    assert "N1" in reconciler.touch(src, partition).observed_ids
+
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+    assert recon_result.tombstoned == 0
+
+
+@pytest.mark.asyncio
+async def test_project_items_all_valid_reconciles_and_tombstones_absent() -> None:
+    """Control: a clean project read stays reconcilable so tombstoning still works."""
+
+    def graphql_handler(_query: str, _variables: dict[str, Any]) -> FakeResp:
+        return _project_page([{"id": "N1"}], has_next=False, end_cursor=None)
+
+    service = _service(FakeClient(graphql_handler=graphql_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_project_items(FakeSession(), result, reconciler)  # type: ignore[arg-type]
+
+    partition = _project_partition("Mhaizza", 4)
+    src = SourceType.GITHUB_PROJECT_ITEM.value
+    assert not result.errors
+    assert _is_reconcilable(reconciler, src, partition)
+
+    absent = FakeRow("N1")
+    stale = FakeRow("OLD")
+
+    async def fake_load(_session: Any, st: str, pk: str) -> list[Any]:
+        return [absent, stale] if (st, pk) == (src, partition) else []
+
+    service._load_partition_rows = fake_load  # type: ignore[method-assign]
+    recon_result = SyncResult(ok=True, partial=False)
+    await service._reconcile(FakeSession(), reconciler, recon_result)  # type: ignore[arg-type]
+    assert absent.tombstoned is False  # observed → live
+    assert stale.tombstoned is True  # unobserved in a complete partition → tombstoned
+
+
+@pytest.mark.asyncio
+async def test_project_items_missing_end_cursor_marks_partial_and_keeps_records_live() -> None:
+    def graphql_handler(_query: str, _variables: dict[str, Any]) -> FakeResp:
+        # hasNextPage=True but endCursor missing/empty → unsafe; stop + partial.
+        return _project_page([{"id": "N1"}], has_next=True, end_cursor="")
+
+    service = _service(FakeClient(graphql_handler=graphql_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_project_items(FakeSession(), result, reconciler)  # type: ignore[arg-type]
+
+    partition = _project_partition("Mhaizza", 4)
+    src = SourceType.GITHUB_PROJECT_ITEM.value
+    assert any("endCursor" in e for e in result.errors)
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+    assert recon_result.tombstoned == 0
+
+
+@pytest.mark.asyncio
+async def test_project_items_none_end_cursor_marks_partial() -> None:
+    def graphql_handler(_query: str, _variables: dict[str, Any]) -> FakeResp:
+        return _project_page([{"id": "N1"}], has_next=True, end_cursor=None)
+
+    service = _service(FakeClient(graphql_handler=graphql_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_project_items(FakeSession(), result, reconciler)  # type: ignore[arg-type]
+
+    partition = _project_partition("Mhaizza", 4)
+    src = SourceType.GITHUB_PROJECT_ITEM.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+
+
+@pytest.mark.asyncio
+async def test_project_items_repeated_end_cursor_marks_partial_and_keeps_records_live() -> None:
+    def graphql_handler(_query: str, variables: dict[str, Any]) -> FakeResp:
+        # Every page advertises the same cursor "C1": a loop that must be rejected.
+        return _project_page([{"id": "N1"}], has_next=True, end_cursor="C1")
+
+    service = _service(FakeClient(graphql_handler=graphql_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_project_items(FakeSession(), result, reconciler)  # type: ignore[arg-type]
+
+    partition = _project_partition("Mhaizza", 4)
+    src = SourceType.GITHUB_PROJECT_ITEM.value
+    assert any("repeated" in e for e in result.errors)
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+    assert recon_result.tombstoned == 0
+
+
+@pytest.mark.asyncio
+async def test_project_items_page_cap_overflow_marks_partial_and_keeps_records_live() -> None:
+    calls: list[int] = []
+
+    def graphql_handler(_query: str, variables: dict[str, Any]) -> FakeResp:
+        calls.append(1)
+        # Unique cursor per page so the cap (not the repeat guard) is what trips.
+        return _project_page([{"id": f"N{len(calls)}"}], has_next=True, end_cursor=f"c{len(calls)}")
+
+    service = _service(FakeClient(graphql_handler=graphql_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_project_items(FakeSession(), result, reconciler)  # type: ignore[arg-type]
+
+    partition = _project_partition("Mhaizza", 4)
+    src = SourceType.GITHUB_PROJECT_ITEM.value
+    assert any("page cap" in e for e in result.errors)
+    assert len(calls) == _GRAPHQL_MAX_PAGES  # capped, did not loop forever
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+    assert recon_result.tombstoned == 0
+
+
+def _one_valid_one_malformed_rest(valid: dict[str, Any]) -> Any:
+    def rest_handler(_path: str, params: dict[str, Any]) -> FakeResp:
+        page = params.get("page", 1)
+        if page == 1:
+            return FakeResp(200, [valid, {"missing": "node_id"}])
+        return FakeResp(200, [])
+
+    return rest_handler
+
+
+def _one_valid_one_malformed_wrapped(key: str, valid: dict[str, Any]) -> Any:
+    def rest_handler(_path: str, params: dict[str, Any]) -> FakeResp:
+        page = params.get("page", 1)
+        if page == 1:
+            return FakeResp(200, {key: [valid, "not-a-dict"]})
+        return FakeResp(200, {key: []})
+
+    return rest_handler
+
+
+@pytest.mark.asyncio
+async def test_issue_comments_malformed_element_marks_partial() -> None:
+    service = _service(FakeClient(rest_handler=_one_valid_one_malformed_rest({"node_id": "C1"})))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_issue_comments(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", 5, "PARENT", result, reconciler
+    )  # type: ignore[arg-type]
+    partition = _issue_comments_partition("Mhaizza", "ai-space-colony-sim", 5)
+    src = SourceType.GITHUB_ISSUE_COMMENT.value
+    assert result.errors
+    assert "C1" in reconciler.touch(src, partition).observed_ids
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+    assert recon_result.tombstoned == 0
+
+
+@pytest.mark.asyncio
+async def test_pr_reviews_malformed_element_marks_both_partitions_partial() -> None:
+    def rest_handler(path: str, params: dict[str, Any]) -> FakeResp:
+        page = params.get("page", 1)
+        if page != 1:
+            return FakeResp(200, [])
+        # Both the reviews list and the review-comments list carry a bad element.
+        return FakeResp(200, [{"node_id": "R1"}, {"missing": "id"}])
+
+    service = _service(FakeClient(rest_handler=rest_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_pr_reviews(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", 7, "PARENT", result, reconciler
+    )  # type: ignore[arg-type]
+
+    reviews_partition = _pr_reviews_partition("Mhaizza", "ai-space-colony-sim", 7)
+    comments_partition = _pr_review_comments_partition("Mhaizza", "ai-space-colony-sim", 7)
+    reviews_src = SourceType.GITHUB_PULL_REQUEST_REVIEW.value
+    comments_src = SourceType.GITHUB_PULL_REQUEST_REVIEW_COMMENT.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, reviews_src, reviews_partition)
+    assert not _is_reconcilable(reconciler, comments_src, comments_partition)
+    for src, part in (
+        (reviews_src, reviews_partition),
+        (comments_src, comments_partition),
+    ):
+        existing, recon_result = await _reconcile_keeps_existing_row_live(
+            service, reconciler, src, part
+        )
+        assert existing.tombstoned is False
+
+
+@pytest.mark.asyncio
+async def test_commit_status_malformed_element_marks_partial() -> None:
+    service = _service(
+        FakeClient(rest_handler=_one_valid_one_malformed_wrapped("statuses", {"node_id": "S1"}))
+    )
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    head = "d" * 40
+    await service._sync_commit_status(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+    partition = _commit_status_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_COMMIT_STATUS.value
+    assert result.errors
+    assert "S1" in reconciler.touch(src, partition).observed_ids
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, recon_result = await _reconcile_keeps_existing_row_live(
+        service, reconciler, src, partition
+    )
+    assert existing.tombstoned is False
+
+
+@pytest.mark.asyncio
+async def test_check_runs_malformed_element_marks_partial() -> None:
+    service = _service(
+        FakeClient(rest_handler=_one_valid_one_malformed_wrapped("check_runs", {"node_id": "CR1"}))
+    )
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    head = "e" * 40
+    await service._sync_check_runs(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+    partition = _check_runs_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_CHECK_RUN.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, _ = await _reconcile_keeps_existing_row_live(service, reconciler, src, partition)
+    assert existing.tombstoned is False
+
+
+@pytest.mark.asyncio
+async def test_check_suites_malformed_element_marks_partial() -> None:
+    service = _service(
+        FakeClient(
+            rest_handler=_one_valid_one_malformed_wrapped("check_suites", {"node_id": "CS1"})
+        )
+    )
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    head = "f" * 40
+    await service._sync_check_suites(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+    partition = _check_suites_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_CHECK_SUITE.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, _ = await _reconcile_keeps_existing_row_live(service, reconciler, src, partition)
+    assert existing.tombstoned is False
+
+
+@pytest.mark.asyncio
+async def test_workflow_runs_malformed_element_marks_partial() -> None:
+    service = _service(
+        FakeClient(
+            rest_handler=_one_valid_one_malformed_wrapped("workflow_runs", {"node_id": "WR1"})
+        )
+    )
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    head = "a" * 40
+    await service._sync_workflow_runs(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", head, result, reconciler
+    )  # type: ignore[arg-type]
+    partition = _workflow_runs_partition("Mhaizza", "ai-space-colony-sim", head)
+    src = SourceType.GITHUB_WORKFLOW_RUN.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, _ = await _reconcile_keeps_existing_row_live(service, reconciler, src, partition)
+    assert existing.tombstoned is False
+
+
+@pytest.mark.asyncio
+async def test_issue_malformed_body_marks_partition_partial() -> None:
+    def rest_handler(_path: str, _params: dict[str, Any]) -> FakeResp:
+        return FakeResp(200, ["not", "an", "object"])
+
+    service = _service(FakeClient(rest_handler=rest_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_issue(
+        FakeSession(), "Mhaizza", "ai-space-colony-sim", 5, "NODE", result, reconciler
+    )  # type: ignore[arg-type]
+    partition = _issue_partition("Mhaizza", "ai-space-colony-sim")
+    src = SourceType.GITHUB_ISSUE.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, _ = await _reconcile_keeps_existing_row_live(service, reconciler, src, partition)
+    assert existing.tombstoned is False
+
+
+@pytest.mark.asyncio
+async def test_pull_malformed_body_marks_partition_partial() -> None:
+    def rest_handler(_path: str, _params: dict[str, Any]) -> FakeResp:
+        return FakeResp(200, 12345)
+
+    service = _service(FakeClient(rest_handler=rest_handler))
+    reconciler = PartitionReconciler()
+    result = SyncResult(ok=True, partial=False)
+    await service._sync_pull(
+        FakeSession(),
+        "Mhaizza",
+        "ai-space-colony-sim",
+        7,
+        "NODE",
+        {"headRefOid": "a" * 40},
+        result,
+        reconciler,
+    )  # type: ignore[arg-type]
+    partition = _pull_partition("Mhaizza", "ai-space-colony-sim")
+    src = SourceType.GITHUB_PULL_REQUEST.value
+    assert result.errors
+    assert not _is_reconcilable(reconciler, src, partition)
+    existing, _ = await _reconcile_keeps_existing_row_live(service, reconciler, src, partition)
+    assert existing.tombstoned is False
