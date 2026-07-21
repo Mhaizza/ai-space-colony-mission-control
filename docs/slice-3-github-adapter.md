@@ -17,7 +17,7 @@ Configure these in ignored `.env` / `backend/.env` (never commit real secrets):
 | `GITHUB_SELF_OWNER` / `GITHUB_SELF_REPO` | Authoritative workflow repo |
 | `GITHUB_MISSION_CONTROL_OWNER` / `GITHUB_MISSION_CONTROL_REPO` | Fork mapping for `mission-control` qualifier probes |
 | `GITHUB_POLL_INTERVAL_SECONDS` | 15–300 (default 15) |
-| `GITHUB_RUN_STARTUP_PROBES` | Fail-closed scope + capability probes when adapter enabled |
+| `GITHUB_RUN_STARTUP_PROBES` | Mandatory when adapter enabled — must stay `true`. Not a bypass: setting `false` while `GITHUB_PAT` is set fails startup. Fail-closed scope + capability probes always run before any polling. |
 | `MC_PRINCIPAL_REGISTRY_JSON` | Server-only principal registry JSON |
 | `MUTATIONS_HARD_DISABLED` | Must remain `true` |
 
@@ -48,8 +48,29 @@ It re-invokes the same outbound read-only sync path as polling and never writes 
 
 - No GitHub mutations, no inbound webhooks
 - Credentials never enter browser bundles, API responses, logs, projection rows, or quarantine diagnostics
+- Exact `{read:project}` scope + capability probes always run before any polling (no bypass)
 - Partial/failed reads never tombstone or infer deletion
 - Conflicting assignments quarantine rather than selecting a winner
+
+## Partition reconciliation and tombstoning
+
+Records are grouped into completeness partitions keyed by
+`(source_type, partition_key)` — for example one partition per project, per
+repository issue/PR set, and per card's comments/reviews/checks. During a sync
+the adapter records every observed source id per partition and whether that
+partition's reads completed fully.
+
+- REST collection endpoints (issue comments, PR reviews, PR inline review
+  comments, commit statuses, check runs, check suites, workflow runs) are fully
+  paginated. A first page is never treated as a complete partition.
+- A partition is reconciled — records absent from it are tombstoned — only after
+  every page and every required read for that exact partition succeeds.
+- Any non-success/malformed/interrupted/rate-limited/failed read (including
+  check/status/workflow reads) marks that partition partial: the sync result is
+  partial and that partition is never tombstoned.
+- Reconciliation is isolated per partition and source type; a previously
+  tombstoned record is revived when observed again. Repeated identical syncs are
+  idempotent.
 
 ## Deferred to Slice 3.5
 

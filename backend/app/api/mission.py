@@ -26,6 +26,7 @@ class MissionRefreshResponse(BaseModel):
     partial: bool
     projected: int
     quarantined: int
+    tombstoned: int = 0
     errors: list[str] = Field(default_factory=list)
     effective_assignments: dict[str, dict[str, str]] = Field(default_factory=dict)
 
@@ -69,8 +70,7 @@ async def refresh_mission_projection(
                 mission_control_owner=settings.github_mission_control_owner or None,
                 mission_control_repo=settings.github_mission_control_repo or None,
                 mission_control_enabled=bool(
-                    settings.github_mission_control_owner
-                    and settings.github_mission_control_repo
+                    settings.github_mission_control_owner and settings.github_mission_control_repo
                 ),
             ),
             token_for_redaction=token,
@@ -87,6 +87,7 @@ async def refresh_mission_projection(
         partial=result.partial,
         projected=result.projected,
         quarantined=result.quarantined,
+        tombstoned=result.tombstoned,
         errors=result.errors,
         effective_assignments=assignments,
     )

@@ -447,6 +447,73 @@ class MissionControlFastAPI(FastAPI):
         return _build_custom_openapi(self)
 
 
+async def _start_github_adapter(fastapi_app: FastAPI) -> None:
+    """Run mandatory fail-closed startup probes, then start polling.
+
+    Exact scope + capability probes always run before any adapter activity;
+    there is no bypass. If any probe fails the client is closed and the error
+    propagates, so polling never starts on an unverified token (ADR-23 D5).
+    """
+    client = GitHubReadClient(token=settings.github_pat)
+    try:
+        repos = [
+            RepoProbeTarget(
+                qualifier="self",
+                owner=settings.github_self_owner,
+                repo=settings.github_self_repo,
+            )
+        ]
+        if settings.github_mission_control_owner and settings.github_mission_control_repo:
+            repos.append(
+                RepoProbeTarget(
+                    qualifier="mission-control",
+                    owner=settings.github_mission_control_owner,
+                    repo=settings.github_mission_control_repo,
+                )
+            )
+        await run_startup_probes(
+            client,
+            project_owner=settings.github_project_owner,
+            project_number=settings.github_project_number,
+            repos=repos,
+        )
+        logger.info("app.lifecycle.github_probes.ok")
+
+        registry = parse_principal_registry_json(settings.mc_principal_registry_json)
+        sync_config = SyncConfig(
+            project_owner=settings.github_project_owner,
+            project_number=settings.github_project_number,
+            self_owner=settings.github_self_owner,
+            self_repo=settings.github_self_repo,
+            mission_control_owner=settings.github_mission_control_owner or None,
+            mission_control_repo=settings.github_mission_control_repo or None,
+            mission_control_enabled=bool(
+                settings.github_mission_control_owner and settings.github_mission_control_repo
+            ),
+        )
+
+        async def _poll_tick() -> None:
+            service = GitHubSyncService(
+                client=client,
+                registry=registry,
+                config=sync_config,
+                token_for_redaction=settings.github_pat,
+            )
+            async with async_session_maker() as session:
+                await service.run(session)
+
+        poller = PollingScheduler(
+            interval_seconds=settings.github_poll_interval_seconds,
+            tick=_poll_tick,
+        )
+        poller.start()
+        fastapi_app.state.github_client = client
+        fastapi_app.state.github_poller = poller
+    except Exception:
+        await client.aclose()
+        raise
+
+
 @asynccontextmanager
 async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
     """Initialize application resources before serving requests."""
@@ -467,68 +534,8 @@ async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("app.lifecycle.rate_limit backend=memory")
 
-    poller = None
     if settings.github_adapter_enabled:
-        client = GitHubReadClient(token=settings.github_pat)
-        try:
-            if settings.github_run_startup_probes:
-                repos = [
-                    RepoProbeTarget(
-                        qualifier="self",
-                        owner=settings.github_self_owner,
-                        repo=settings.github_self_repo,
-                    )
-                ]
-                if settings.github_mission_control_owner and settings.github_mission_control_repo:
-                    repos.append(
-                        RepoProbeTarget(
-                            qualifier="mission-control",
-                            owner=settings.github_mission_control_owner,
-                            repo=settings.github_mission_control_repo,
-                        )
-                    )
-                await run_startup_probes(
-                    client,
-                    project_owner=settings.github_project_owner,
-                    project_number=settings.github_project_number,
-                    repos=repos,
-                )
-                logger.info("app.lifecycle.github_probes.ok")
-
-            registry = parse_principal_registry_json(settings.mc_principal_registry_json)
-            sync_config = SyncConfig(
-                project_owner=settings.github_project_owner,
-                project_number=settings.github_project_number,
-                self_owner=settings.github_self_owner,
-                self_repo=settings.github_self_repo,
-                mission_control_owner=settings.github_mission_control_owner or None,
-                mission_control_repo=settings.github_mission_control_repo or None,
-                mission_control_enabled=bool(
-                    settings.github_mission_control_owner
-                    and settings.github_mission_control_repo
-                ),
-            )
-
-            async def _poll_tick() -> None:
-                service = GitHubSyncService(
-                    client=client,
-                    registry=registry,
-                    config=sync_config,
-                    token_for_redaction=settings.github_pat,
-                )
-                async with async_session_maker() as session:
-                    await service.run(session)
-
-            poller = PollingScheduler(
-                interval_seconds=settings.github_poll_interval_seconds,
-                tick=_poll_tick,
-            )
-            poller.start()
-            fastapi_app.state.github_client = client
-            fastapi_app.state.github_poller = poller
-        except Exception:
-            await client.aclose()
-            raise
+        await _start_github_adapter(fastapi_app)
     else:
         logger.info("app.lifecycle.github_adapter.disabled")
 

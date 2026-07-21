@@ -21,9 +21,7 @@ MUTATIONS_DISABLED_MESSAGE = (
 )
 
 # Exactly one explicit exception: D3 manual refresh (read-only outbound sync).
-MUTATION_ALLOWLIST: Final[frozenset[tuple[str, str]]] = frozenset(
-    {MANUAL_REFRESH_ALLOWLIST_ENTRY}
-)
+MUTATION_ALLOWLIST: Final[frozenset[tuple[str, str]]] = frozenset({MANUAL_REFRESH_ALLOWLIST_ENTRY})
 
 
 def inventory_mutating_routes(app: FastAPI) -> list[tuple[str, str]]:

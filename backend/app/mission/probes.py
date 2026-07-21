@@ -40,20 +40,15 @@ async def run_startup_probes(
     # Scope probe via /rate_limit (lightweight authenticated GET).
     rate = await client.rest_get("/rate_limit")
     if rate.status_code >= 400:
-        raise RuntimeError(
-            f"Fail-closed: GitHub auth probe failed status={rate.status_code}"
-        )
+        raise RuntimeError(f"Fail-closed: GitHub auth probe failed status={rate.status_code}")
     oauth_header = rate.headers.get("x-oauth-scopes")
     verify_exact_read_project_scope(oauth_header)
-    scopes = frozenset(
-        p.strip().lower() for p in (oauth_header or "").split(",") if p.strip()
-    )
+    scopes = frozenset(p.strip().lower() for p in (oauth_header or "").split(",") if p.strip())
 
     project_ok = await _probe_project(client, project_owner, project_number, details)
     if not project_ok:
         raise RuntimeError(
-            "Fail-closed: cannot read configured user-owned GitHub Project; "
-            + "; ".join(details)
+            "Fail-closed: cannot read configured user-owned GitHub Project; " + "; ".join(details)
         )
 
     repo_results: dict[str, bool] = {}
@@ -142,7 +137,9 @@ async def _probe_repo(
                 f"/pulls/{number}/reviews",
                 f"/issues/{number}/comments",
             ):
-                response = await client.rest_get(f"/repos/{owner}/{repo}{suffix}", params={"per_page": 1})
+                response = await client.rest_get(
+                    f"/repos/{owner}/{repo}{suffix}", params={"per_page": 1}
+                )
                 if response.status_code >= 400:
                     details.append(f"{suffix} status={response.status_code}")
                     return False
@@ -152,7 +149,9 @@ async def _probe_repo(
                 f"/commits/{head_sha}/check-runs",
                 f"/commits/{head_sha}/check-suites",
             ):
-                response = await client.rest_get(f"/repos/{owner}/{repo}{suffix}", params={"per_page": 1})
+                response = await client.rest_get(
+                    f"/repos/{owner}/{repo}{suffix}", params={"per_page": 1}
+                )
                 if response.status_code >= 400:
                     details.append(f"{suffix} status={response.status_code}")
                     return False

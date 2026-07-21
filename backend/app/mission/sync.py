@@ -1,11 +1,17 @@
-"""Read-only GitHub sync orchestration with partial-read safety."""
+"""Read-only GitHub sync orchestration with partial-read safety.
+
+Reconciliation is partition-scoped: each ``(source_type, partition_key)`` pair is
+a completeness partition. A partition is reconciled (absent records tombstoned)
+only after every page and every required read for it completed successfully.
+Partial, malformed, interrupted, rate-limited, or failed reads never tombstone.
+"""
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
-from typing import Any
-from uuid import UUID
+from typing import Any, Final
 
 from sqlmodel import col, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -15,12 +21,12 @@ from app.mission.assignment import derive_effective_assignments
 from app.mission.authorization import authorize_record_author
 from app.mission.github_client import PROJECT_ITEMS_QUERY, GitHubReadClient
 from app.mission.principal_registry import PrincipalRegistry
+from app.mission.reconciliation import PartitionReconciler, select_tombstones
 from app.mission.redaction import scrub_mapping
 from app.mission.types import QuarantineReason, SourceType
 from app.mission.validation import (
     CandidateRecord,
     CommentSourceMeta,
-    ValidationIssue,
     check_card_binding,
     check_edited_comment,
     check_exact_head,
@@ -28,6 +34,11 @@ from app.mission.validation import (
 )
 from app.mission.workflow_record import parse_workflow_record_from_comment
 from app.models.mc_projection import McProjectionRecord, McQuarantine, McSyncState
+
+# REST collection pagination limits. Hitting the page cap is treated as a
+# partial read (fail-safe: never tombstone from a truncated enumeration).
+_PER_PAGE: Final[int] = 100
+_MAX_PAGES: Final[int] = 100
 
 
 @dataclass
@@ -47,8 +58,67 @@ class SyncResult:
     partial: bool
     projected: int = 0
     quarantined: int = 0
+    tombstoned: int = 0
     errors: list[str] = field(default_factory=list)
     effective_assignments: dict[int, dict[str, str]] = field(default_factory=dict)
+
+
+def _project_partition(owner: str, number: int) -> str:
+    return f"project:{owner}:{number}"
+
+
+def _issue_partition(owner: str, repo: str) -> str:
+    return f"repo:{owner}/{repo}:issue"
+
+
+def _pull_partition(owner: str, repo: str) -> str:
+    return f"repo:{owner}/{repo}:pull"
+
+
+def _issue_comments_partition(owner: str, repo: str, number: int) -> str:
+    return f"issue_comments:{owner}/{repo}#{number}"
+
+
+def _pr_reviews_partition(owner: str, repo: str, number: int) -> str:
+    return f"pr_reviews:{owner}/{repo}#{number}"
+
+
+def _pr_review_comments_partition(owner: str, repo: str, number: int) -> str:
+    return f"pr_review_comments:{owner}/{repo}#{number}"
+
+
+def _commit_status_partition(owner: str, repo: str, head_sha: str) -> str:
+    return f"commit_status:{owner}/{repo}@{head_sha}"
+
+
+def _check_runs_partition(owner: str, repo: str, head_sha: str) -> str:
+    return f"check_runs:{owner}/{repo}@{head_sha}"
+
+
+def _check_suites_partition(owner: str, repo: str, head_sha: str) -> str:
+    return f"check_suites:{owner}/{repo}@{head_sha}"
+
+
+def _workflow_runs_partition(owner: str, repo: str, head_sha: str) -> str:
+    return f"workflow_runs:{owner}/{repo}@{head_sha}"
+
+
+def _array_extractor(body: Any) -> list[Any] | None:
+    """Extract a top-level JSON array page; None marks a malformed response."""
+    return body if isinstance(body, list) else None
+
+
+def _wrapped_extractor(key: str) -> Callable[[Any], list[Any] | None]:
+    """Build an extractor for ``{key: [...]}`` object-wrapped collection pages."""
+
+    def _extract(body: Any) -> list[Any] | None:
+        if isinstance(body, dict):
+            value = body.get(key)
+            if isinstance(value, list):
+                return value
+        return None
+
+    return _extract
 
 
 class GitHubSyncService:
@@ -76,10 +146,12 @@ class GitHubSyncService:
         await session.commit()
 
         result = SyncResult(ok=True, partial=False)
+        reconciler = PartitionReconciler()
         try:
-            await self._sync_project_items(session, result)
-            await self._sync_linked_issues_and_prs(session, result)
-            # Workflow records processed from projected issue comments.
+            await self._sync_project_items(session, result, reconciler)
+            await self._sync_linked_issues_and_prs(session, result, reconciler)
+            # Reconcile before deriving so tombstoned records drop out of state.
+            await self._reconcile(session, reconciler, result)
             await self._derive_workflow_state(session, result)
             if result.errors:
                 result.partial = True
@@ -115,6 +187,69 @@ class GitHubSyncService:
         await session.flush()
         return state
 
+    async def _paginate_rest(
+        self,
+        path: str,
+        *,
+        params: dict[str, str | int] | None,
+        extract: Callable[[Any], list[Any] | None],
+    ) -> tuple[list[Any], bool]:
+        """Fetch every page of a REST collection.
+
+        Returns ``(items, ok)``. ``ok`` is False on any non-success status, any
+        malformed page, or exceeding the page cap — signalling a partial read so
+        the caller marks the partition incomplete and never tombstones.
+        """
+        items: list[Any] = []
+        base = dict(params or {})
+        page = 1
+        while True:
+            response = await self._client.rest_get(
+                path,
+                params={**base, "per_page": _PER_PAGE, "page": page},
+            )
+            if response.status_code >= 400:
+                return items, False
+            chunk = extract(response.json_body)
+            if chunk is None:
+                return items, False
+            items.extend(chunk)
+            if len(chunk) < _PER_PAGE:
+                return items, True
+            page += 1
+            if page > _MAX_PAGES:
+                return items, False
+
+    async def _load_partition_rows(
+        self,
+        session: AsyncSession,
+        source_type: str,
+        partition_key: str,
+    ) -> list[McProjectionRecord]:
+        stmt = select(McProjectionRecord).where(
+            col(McProjectionRecord.source_type) == source_type,
+            col(McProjectionRecord.partition_key) == partition_key,
+            col(McProjectionRecord.tombstoned).is_(False),
+        )
+        return list(await session.exec(stmt))
+
+    async def _reconcile(
+        self,
+        session: AsyncSession,
+        reconciler: PartitionReconciler,
+        result: SyncResult,
+    ) -> None:
+        """Tombstone unobserved records in fully-completed partitions only."""
+        now = utcnow()
+        for partition in reconciler.reconcilable_partitions():
+            rows = await self._load_partition_rows(
+                session, partition.source_type, partition.partition_key
+            )
+            for row in select_tombstones(partition, rows):
+                row.tombstoned = True
+                row.projected_at = now
+                result.tombstoned += 1
+
     async def _upsert_projection(
         self,
         session: AsyncSession,
@@ -126,6 +261,7 @@ class GitHubSyncService:
         partition_key: str,
         payload: dict[str, Any],
         result: SyncResult,
+        reconciler: PartitionReconciler,
     ) -> None:
         safe_payload = scrub_mapping(payload, secrets=self._secrets)
         stmt = select(McProjectionRecord).where(
@@ -153,8 +289,10 @@ class GitHubSyncService:
             row.projected_at = now
             row.last_observed_at = now
             row.partition_key = partition_key
+            # Revive a previously tombstoned record now that it is observed again.
             row.tombstoned = False
             row.payload = safe_payload if isinstance(safe_payload, dict) else {}
+        reconciler.observe(source_type.value, partition_key, source_id)
         result.projected += 1
 
     async def _quarantine(
@@ -185,9 +323,16 @@ class GitHubSyncService:
         )
         result.quarantined += 1
 
-    async def _sync_project_items(self, session: AsyncSession, result: SyncResult) -> None:
+    async def _sync_project_items(
+        self,
+        session: AsyncSession,
+        result: SyncResult,
+        reconciler: PartitionReconciler,
+    ) -> None:
         after: str | None = None
-        partition = f"project:{self._config.project_owner}:{self._config.project_number}"
+        partition = _project_partition(self._config.project_owner, self._config.project_number)
+        source_type = SourceType.GITHUB_PROJECT_ITEM
+        reconciler.touch(source_type.value, partition)
         try:
             while True:
                 response = await self._client.graphql(
@@ -200,10 +345,12 @@ class GitHubSyncService:
                 )
                 if response.status_code >= 400:
                     result.errors.append(f"project items status={response.status_code}")
+                    reconciler.mark_partial(source_type.value, partition)
                     return
                 body = response.json_body
                 if not isinstance(body, dict) or body.get("errors"):
                     result.errors.append(f"project items errors={body!r}")
+                    reconciler.mark_partial(source_type.value, partition)
                     return
                 data = body.get("data") or {}
                 user = data.get("user") if isinstance(data, dict) else None
@@ -211,19 +358,21 @@ class GitHubSyncService:
                 items = (project or {}).get("items") if isinstance(project, dict) else None
                 if not isinstance(items, dict):
                     result.errors.append("project items missing")
+                    reconciler.mark_partial(source_type.value, partition)
                     return
                 for node in items.get("nodes") or []:
                     if not isinstance(node, dict) or not node.get("id"):
                         continue
                     await self._upsert_projection(
                         session,
-                        source_type=SourceType.GITHUB_PROJECT_ITEM,
+                        source_type=source_type,
                         source_id=str(node["id"]),
                         source_url=None,
                         source_updated_at=_parse_gh_time(node.get("updatedAt")),
                         partition_key=partition,
                         payload=node,
                         result=result,
+                        reconciler=reconciler,
                     )
                 page = items.get("pageInfo") or {}
                 if not page.get("hasNextPage"):
@@ -231,17 +380,36 @@ class GitHubSyncService:
                 after = page.get("endCursor")
         except Exception as exc:  # noqa: BLE001
             result.errors.append(f"project sync failed: {exc}")
+            reconciler.mark_partial(source_type.value, partition)
 
     async def _sync_linked_issues_and_prs(
-        self, session: AsyncSession, result: SyncResult
+        self,
+        session: AsyncSession,
+        result: SyncResult,
+        reconciler: PartitionReconciler,
     ) -> None:
         """Sync issues/PRs/comments discovered via projected project items."""
+        owner, repo = self._config.self_owner, self._config.self_repo
+        issue_partition = _issue_partition(owner, repo)
+        pull_partition = _pull_partition(owner, repo)
+        reconciler.touch(SourceType.GITHUB_ISSUE.value, issue_partition)
+        reconciler.touch(SourceType.GITHUB_PULL_REQUEST.value, pull_partition)
+
+        # The set of linked issues/PRs is only complete if the project read was
+        # complete; otherwise the entity partitions must not be reconciled.
+        project_state = reconciler.touch(
+            SourceType.GITHUB_PROJECT_ITEM.value,
+            _project_partition(self._config.project_owner, self._config.project_number),
+        )
+        if not project_state.complete:
+            reconciler.mark_partial(SourceType.GITHUB_ISSUE.value, issue_partition)
+            reconciler.mark_partial(SourceType.GITHUB_PULL_REQUEST.value, pull_partition)
+
         stmt = select(McProjectionRecord).where(
             col(McProjectionRecord.source_type) == SourceType.GITHUB_PROJECT_ITEM.value,
             col(McProjectionRecord.tombstoned).is_(False),
         )
         items = list(await session.exec(stmt))
-        owner, repo = self._config.self_owner, self._config.self_repo
         for item in items:
             content = (item.payload or {}).get("content")
             if not isinstance(content, dict):
@@ -252,9 +420,11 @@ class GitHubSyncService:
             if not isinstance(number, int) or not isinstance(node_id, str):
                 continue
             if typename == "Issue":
-                await self._sync_issue(session, owner, repo, number, node_id, result)
+                await self._sync_issue(session, owner, repo, number, node_id, result, reconciler)
             elif typename == "PullRequest":
-                await self._sync_pull(session, owner, repo, number, node_id, content, result)
+                await self._sync_pull(
+                    session, owner, repo, number, node_id, content, result, reconciler
+                )
 
     async def _sync_issue(
         self,
@@ -264,11 +434,14 @@ class GitHubSyncService:
         number: int,
         node_id: str,
         result: SyncResult,
+        reconciler: PartitionReconciler,
     ) -> None:
+        partition = _issue_partition(owner, repo)
         path = f"/repos/{owner}/{repo}/issues/{number}"
         response = await self._client.rest_get(path)
         if response.status_code >= 400:
             result.errors.append(f"issue {number} status={response.status_code}")
+            reconciler.mark_partial(SourceType.GITHUB_ISSUE.value, partition)
             return
         body = response.json_body if isinstance(response.json_body, dict) else {}
         await self._upsert_projection(
@@ -277,11 +450,12 @@ class GitHubSyncService:
             source_id=str(body.get("node_id") or node_id),
             source_url=body.get("html_url"),
             source_updated_at=_parse_gh_time(body.get("updated_at")),
-            partition_key=str(body.get("repository", {}).get("node_id") or f"repo:{owner}/{repo}"),
+            partition_key=partition,
             payload=body,
             result=result,
+            reconciler=reconciler,
         )
-        await self._sync_issue_comments(session, owner, repo, number, node_id, result)
+        await self._sync_issue_comments(session, owner, repo, number, node_id, result, reconciler)
 
     async def _sync_pull(
         self,
@@ -292,11 +466,14 @@ class GitHubSyncService:
         node_id: str,
         content: dict[str, Any],
         result: SyncResult,
+        reconciler: PartitionReconciler,
     ) -> None:
+        partition = _pull_partition(owner, repo)
         path = f"/repos/{owner}/{repo}/pulls/{number}"
         response = await self._client.rest_get(path)
         if response.status_code >= 400:
             result.errors.append(f"pull {number} status={response.status_code}")
+            reconciler.mark_partial(SourceType.GITHUB_PULL_REQUEST.value, partition)
             return
         body = response.json_body if isinstance(response.json_body, dict) else {}
         head_sha = (body.get("head") or {}).get("sha") or content.get("headRefOid")
@@ -306,18 +483,16 @@ class GitHubSyncService:
             source_id=str(body.get("node_id") or node_id),
             source_url=body.get("html_url"),
             source_updated_at=_parse_gh_time(body.get("updated_at")),
-            partition_key=str(
-                (body.get("base") or {}).get("repo", {}).get("node_id")
-                or f"repo:{owner}/{repo}"
-            ),
+            partition_key=partition,
             payload={**body, "_head_sha": head_sha},
             result=result,
+            reconciler=reconciler,
         )
-        # Conversation comments share issue comments endpoint.
-        await self._sync_issue_comments(session, owner, repo, number, node_id, result)
-        await self._sync_pr_reviews(session, owner, repo, number, node_id, result)
+        # Conversation comments share the issue comments endpoint.
+        await self._sync_issue_comments(session, owner, repo, number, node_id, result, reconciler)
+        await self._sync_pr_reviews(session, owner, repo, number, node_id, result, reconciler)
         if isinstance(head_sha, str) and head_sha:
-            await self._sync_checks(session, owner, repo, head_sha, result)
+            await self._sync_checks(session, owner, repo, head_sha, result, reconciler)
 
     async def _sync_issue_comments(
         self,
@@ -327,30 +502,36 @@ class GitHubSyncService:
         number: int,
         parent_node_id: str,
         result: SyncResult,
+        reconciler: PartitionReconciler,
     ) -> None:
-        response = await self._client.rest_get(
+        partition = _issue_comments_partition(owner, repo, number)
+        source_type = SourceType.GITHUB_ISSUE_COMMENT
+        reconciler.touch(source_type.value, partition)
+        comments, ok = await self._paginate_rest(
             f"/repos/{owner}/{repo}/issues/{number}/comments",
-            params={"per_page": 100},
+            params=None,
+            extract=_array_extractor,
         )
-        if response.status_code >= 400:
-            result.errors.append(f"issue comments {number} status={response.status_code}")
+        if not ok:
+            result.errors.append(f"issue comments {number} partial read")
+            reconciler.mark_partial(source_type.value, partition)
             return
-        comments = response.json_body if isinstance(response.json_body, list) else []
         for comment in comments:
             if not isinstance(comment, dict):
                 continue
-            node_id = comment.get("node_id")
-            if not isinstance(node_id, str):
+            comment_node_id = comment.get("node_id")
+            if not isinstance(comment_node_id, str):
                 continue
             await self._upsert_projection(
                 session,
-                source_type=SourceType.GITHUB_ISSUE_COMMENT,
-                source_id=node_id,
+                source_type=source_type,
+                source_id=comment_node_id,
                 source_url=comment.get("html_url"),
                 source_updated_at=_parse_gh_time(comment.get("updated_at")),
-                partition_key=parent_node_id,
+                partition_key=partition,
                 payload={**comment, "_parent_number": number, "_parent_node_id": parent_node_id},
                 result=result,
+                reconciler=reconciler,
             )
 
     async def _sync_pr_reviews(
@@ -361,50 +542,60 @@ class GitHubSyncService:
         number: int,
         parent_node_id: str,
         result: SyncResult,
+        reconciler: PartitionReconciler,
     ) -> None:
-        reviews = await self._client.rest_get(
+        reviews_partition = _pr_reviews_partition(owner, repo, number)
+        reviews_type = SourceType.GITHUB_PULL_REQUEST_REVIEW
+        reconciler.touch(reviews_type.value, reviews_partition)
+        reviews, ok = await self._paginate_rest(
             f"/repos/{owner}/{repo}/pulls/{number}/reviews",
-            params={"per_page": 100},
+            params=None,
+            extract=_array_extractor,
         )
-        if reviews.status_code >= 400:
-            result.errors.append(f"reviews {number} status={reviews.status_code}")
-            return
-        for review in reviews.json_body if isinstance(reviews.json_body, list) else []:
-            if not isinstance(review, dict) or not isinstance(review.get("node_id"), str):
-                continue
-            await self._upsert_projection(
-                session,
-                source_type=SourceType.GITHUB_PULL_REQUEST_REVIEW,
-                source_id=review["node_id"],
-                source_url=review.get("html_url"),
-                source_updated_at=_parse_gh_time(review.get("submitted_at")),
-                partition_key=parent_node_id,
-                payload=review,
-                result=result,
-            )
-        review_comments = await self._client.rest_get(
+        if not ok:
+            result.errors.append(f"reviews {number} partial read")
+            reconciler.mark_partial(reviews_type.value, reviews_partition)
+        else:
+            for review in reviews:
+                if not isinstance(review, dict) or not isinstance(review.get("node_id"), str):
+                    continue
+                await self._upsert_projection(
+                    session,
+                    source_type=reviews_type,
+                    source_id=review["node_id"],
+                    source_url=review.get("html_url"),
+                    source_updated_at=_parse_gh_time(review.get("submitted_at")),
+                    partition_key=reviews_partition,
+                    payload=review,
+                    result=result,
+                    reconciler=reconciler,
+                )
+
+        comments_partition = _pr_review_comments_partition(owner, repo, number)
+        comments_type = SourceType.GITHUB_PULL_REQUEST_REVIEW_COMMENT
+        reconciler.touch(comments_type.value, comments_partition)
+        review_comments, ok = await self._paginate_rest(
             f"/repos/{owner}/{repo}/pulls/{number}/comments",
-            params={"per_page": 100},
+            params=None,
+            extract=_array_extractor,
         )
-        if review_comments.status_code >= 400:
-            result.errors.append(
-                f"review comments {number} status={review_comments.status_code}"
-            )
+        if not ok:
+            result.errors.append(f"review comments {number} partial read")
+            reconciler.mark_partial(comments_type.value, comments_partition)
             return
-        for comment in (
-            review_comments.json_body if isinstance(review_comments.json_body, list) else []
-        ):
+        for comment in review_comments:
             if not isinstance(comment, dict) or not isinstance(comment.get("node_id"), str):
                 continue
             await self._upsert_projection(
                 session,
-                source_type=SourceType.GITHUB_PULL_REQUEST_REVIEW_COMMENT,
+                source_type=comments_type,
                 source_id=comment["node_id"],
                 source_url=comment.get("html_url"),
                 source_updated_at=_parse_gh_time(comment.get("updated_at")),
-                partition_key=parent_node_id,
+                partition_key=comments_partition,
                 payload=comment,
                 result=result,
+                reconciler=reconciler,
             )
 
     async def _sync_checks(
@@ -414,82 +605,162 @@ class GitHubSyncService:
         repo: str,
         head_sha: str,
         result: SyncResult,
+        reconciler: PartitionReconciler,
     ) -> None:
-        status = await self._client.rest_get(f"/repos/{owner}/{repo}/commits/{head_sha}/status")
-        if status.status_code < 400 and isinstance(status.json_body, dict):
-            for st in status.json_body.get("statuses") or []:
-                if not isinstance(st, dict):
-                    continue
-                sid = st.get("node_id") or f"status:{head_sha}:{st.get('context')}:{st.get('id')}"
-                await self._upsert_projection(
-                    session,
-                    source_type=SourceType.GITHUB_COMMIT_STATUS,
-                    source_id=str(sid),
-                    source_url=st.get("target_url"),
-                    source_updated_at=_parse_gh_time(st.get("updated_at")),
-                    partition_key=f"repo:{owner}/{repo}:{head_sha}",
-                    payload=st,
-                    result=result,
-                )
-        runs = await self._client.rest_get(
+        await self._sync_commit_status(session, owner, repo, head_sha, result, reconciler)
+        await self._sync_check_runs(session, owner, repo, head_sha, result, reconciler)
+        await self._sync_check_suites(session, owner, repo, head_sha, result, reconciler)
+        await self._sync_workflow_runs(session, owner, repo, head_sha, result, reconciler)
+
+    async def _sync_commit_status(
+        self,
+        session: AsyncSession,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        result: SyncResult,
+        reconciler: PartitionReconciler,
+    ) -> None:
+        partition = _commit_status_partition(owner, repo, head_sha)
+        source_type = SourceType.GITHUB_COMMIT_STATUS
+        reconciler.touch(source_type.value, partition)
+        statuses, ok = await self._paginate_rest(
+            f"/repos/{owner}/{repo}/commits/{head_sha}/status",
+            params=None,
+            extract=_wrapped_extractor("statuses"),
+        )
+        if not ok:
+            result.errors.append(f"commit status {head_sha[:12]} partial read")
+            reconciler.mark_partial(source_type.value, partition)
+            return
+        for st in statuses:
+            if not isinstance(st, dict):
+                continue
+            sid = st.get("node_id") or f"status:{head_sha}:{st.get('context')}:{st.get('id')}"
+            await self._upsert_projection(
+                session,
+                source_type=source_type,
+                source_id=str(sid),
+                source_url=st.get("target_url"),
+                source_updated_at=_parse_gh_time(st.get("updated_at")),
+                partition_key=partition,
+                payload=st,
+                result=result,
+                reconciler=reconciler,
+            )
+
+    async def _sync_check_runs(
+        self,
+        session: AsyncSession,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        result: SyncResult,
+        reconciler: PartitionReconciler,
+    ) -> None:
+        partition = _check_runs_partition(owner, repo, head_sha)
+        source_type = SourceType.GITHUB_CHECK_RUN
+        reconciler.touch(source_type.value, partition)
+        runs, ok = await self._paginate_rest(
             f"/repos/{owner}/{repo}/commits/{head_sha}/check-runs",
-            params={"per_page": 100},
+            params=None,
+            extract=_wrapped_extractor("check_runs"),
         )
-        if runs.status_code < 400 and isinstance(runs.json_body, dict):
-            for run in runs.json_body.get("check_runs") or []:
-                if not isinstance(run, dict) or not isinstance(run.get("node_id"), str):
-                    continue
-                await self._upsert_projection(
-                    session,
-                    source_type=SourceType.GITHUB_CHECK_RUN,
-                    source_id=run["node_id"],
-                    source_url=run.get("html_url"),
-                    source_updated_at=_parse_gh_time(run.get("completed_at") or run.get("started_at")),
-                    partition_key=f"repo:{owner}/{repo}:{head_sha}",
-                    payload=run,
-                    result=result,
-                )
-        suites = await self._client.rest_get(
+        if not ok:
+            result.errors.append(f"check runs {head_sha[:12]} partial read")
+            reconciler.mark_partial(source_type.value, partition)
+            return
+        for run in runs:
+            if not isinstance(run, dict) or not isinstance(run.get("node_id"), str):
+                continue
+            await self._upsert_projection(
+                session,
+                source_type=source_type,
+                source_id=run["node_id"],
+                source_url=run.get("html_url"),
+                source_updated_at=_parse_gh_time(run.get("completed_at") or run.get("started_at")),
+                partition_key=partition,
+                payload=run,
+                result=result,
+                reconciler=reconciler,
+            )
+
+    async def _sync_check_suites(
+        self,
+        session: AsyncSession,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        result: SyncResult,
+        reconciler: PartitionReconciler,
+    ) -> None:
+        partition = _check_suites_partition(owner, repo, head_sha)
+        source_type = SourceType.GITHUB_CHECK_SUITE
+        reconciler.touch(source_type.value, partition)
+        suites, ok = await self._paginate_rest(
             f"/repos/{owner}/{repo}/commits/{head_sha}/check-suites",
-            params={"per_page": 100},
+            params=None,
+            extract=_wrapped_extractor("check_suites"),
         )
-        if suites.status_code < 400 and isinstance(suites.json_body, dict):
-            for suite in suites.json_body.get("check_suites") or []:
-                if not isinstance(suite, dict) or not isinstance(suite.get("node_id"), str):
-                    continue
-                await self._upsert_projection(
-                    session,
-                    source_type=SourceType.GITHUB_CHECK_SUITE,
-                    source_id=suite["node_id"],
-                    source_url=None,
-                    source_updated_at=_parse_gh_time(suite.get("updated_at")),
-                    partition_key=f"repo:{owner}/{repo}:{head_sha}",
-                    payload=suite,
-                    result=result,
-                )
-        workflow = await self._client.rest_get(
+        if not ok:
+            result.errors.append(f"check suites {head_sha[:12]} partial read")
+            reconciler.mark_partial(source_type.value, partition)
+            return
+        for suite in suites:
+            if not isinstance(suite, dict) or not isinstance(suite.get("node_id"), str):
+                continue
+            await self._upsert_projection(
+                session,
+                source_type=source_type,
+                source_id=suite["node_id"],
+                source_url=None,
+                source_updated_at=_parse_gh_time(suite.get("updated_at")),
+                partition_key=partition,
+                payload=suite,
+                result=result,
+                reconciler=reconciler,
+            )
+
+    async def _sync_workflow_runs(
+        self,
+        session: AsyncSession,
+        owner: str,
+        repo: str,
+        head_sha: str,
+        result: SyncResult,
+        reconciler: PartitionReconciler,
+    ) -> None:
+        partition = _workflow_runs_partition(owner, repo, head_sha)
+        source_type = SourceType.GITHUB_WORKFLOW_RUN
+        reconciler.touch(source_type.value, partition)
+        runs, ok = await self._paginate_rest(
             f"/repos/{owner}/{repo}/actions/runs",
-            params={"head_sha": head_sha, "per_page": 50},
+            params={"head_sha": head_sha},
+            extract=_wrapped_extractor("workflow_runs"),
         )
-        if workflow.status_code < 400 and isinstance(workflow.json_body, dict):
-            for run in workflow.json_body.get("workflow_runs") or []:
-                if not isinstance(run, dict):
-                    continue
-                sid = run.get("node_id") or f"workflow_run:{run.get('id')}"
-                await self._upsert_projection(
-                    session,
-                    source_type=SourceType.GITHUB_WORKFLOW_RUN,
-                    source_id=str(sid),
-                    source_url=run.get("html_url"),
-                    source_updated_at=_parse_gh_time(run.get("updated_at")),
-                    partition_key=f"repo:{owner}/{repo}:{head_sha}",
-                    payload=run,
-                    result=result,
-                )
+        if not ok:
+            result.errors.append(f"workflow runs {head_sha[:12]} partial read")
+            reconciler.mark_partial(source_type.value, partition)
+            return
+        for run in runs:
+            if not isinstance(run, dict):
+                continue
+            sid = run.get("node_id") or f"workflow_run:{run.get('id')}"
+            await self._upsert_projection(
+                session,
+                source_type=source_type,
+                source_id=str(sid),
+                source_url=run.get("html_url"),
+                source_updated_at=_parse_gh_time(run.get("updated_at")),
+                partition_key=partition,
+                payload=run,
+                result=result,
+                reconciler=reconciler,
+            )
 
     async def _derive_workflow_state(self, session: AsyncSession, result: SyncResult) -> None:
         """Parse/authorize/validate workflow records from projected issue comments."""
-        # Build set of Project-linked issue numbers from project items.
+        # Build set of Project-linked issue numbers from live project items.
         linked_issues: set[int] = set()
         issue_node_by_number: dict[int, str] = {}
         pr_head_by_number: dict[int, str] = {}
@@ -497,8 +768,8 @@ class GitHubSyncService:
         items = list(
             await session.exec(
                 select(McProjectionRecord).where(
-                    col(McProjectionRecord.source_type)
-                    == SourceType.GITHUB_PROJECT_ITEM.value
+                    col(McProjectionRecord.source_type) == SourceType.GITHUB_PROJECT_ITEM.value,
+                    col(McProjectionRecord.tombstoned).is_(False),
                 )
             )
         )
@@ -520,8 +791,8 @@ class GitHubSyncService:
         prs = list(
             await session.exec(
                 select(McProjectionRecord).where(
-                    col(McProjectionRecord.source_type)
-                    == SourceType.GITHUB_PULL_REQUEST.value
+                    col(McProjectionRecord.source_type) == SourceType.GITHUB_PULL_REQUEST.value,
+                    col(McProjectionRecord.tombstoned).is_(False),
                 )
             )
         )
@@ -534,8 +805,8 @@ class GitHubSyncService:
         comments = list(
             await session.exec(
                 select(McProjectionRecord).where(
-                    col(McProjectionRecord.source_type)
-                    == SourceType.GITHUB_ISSUE_COMMENT.value
+                    col(McProjectionRecord.source_type) == SourceType.GITHUB_ISSUE_COMMENT.value,
+                    col(McProjectionRecord.tombstoned).is_(False),
                 )
             )
         )
@@ -590,7 +861,10 @@ class GitHubSyncService:
             if not parsed.ok or parsed.record is None:
                 quarantined_ids.add(comment_id)
                 reason = QuarantineReason.MALFORMED_RECORD
-                if any(f.rule_id.endswith("type") or "unknown" in f.message.lower() for f in parsed.findings):
+                if any(
+                    f.rule_id.endswith("type") or "unknown" in f.message.lower()
+                    for f in parsed.findings
+                ):
                     reason = QuarantineReason.UNKNOWN_ENUM
                 await self._quarantine(
                     session,
@@ -678,9 +952,7 @@ class GitHubSyncService:
                 await self._quarantine(
                     session,
                     reason=QuarantineReason.UNAUTHORIZED_SUPERSESSION,
-                    message=(
-                        "Worker-authored start_task may not supersede an existing assignment"
-                    ),
+                    message=("Worker-authored start_task may not supersede an existing assignment"),
                     source_type=SourceType.GITHUB_ISSUE_COMMENT.value,
                     source_id=str(candidate.source.comment_id),
                     source_url=candidate.source.html_url,

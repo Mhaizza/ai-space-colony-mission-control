@@ -52,7 +52,9 @@ def check_edited_comment(source: CommentSourceMeta) -> ValidationIssue | None:
     return None
 
 
-def check_card_binding(source: CommentSourceMeta, record: ParsedWorkflowRecord) -> ValidationIssue | None:
+def check_card_binding(
+    source: CommentSourceMeta, record: ParsedWorkflowRecord
+) -> ValidationIssue | None:
     if not source.on_authoritative_issue:
         return ValidationIssue(
             reason=QuarantineReason.NON_AUTHORITATIVE_SOURCE,
@@ -62,8 +64,7 @@ def check_card_binding(source: CommentSourceMeta, record: ParsedWorkflowRecord) 
         return ValidationIssue(
             reason=QuarantineReason.CARD_BINDING_MISMATCH,
             message=(
-                f"record.card={record.card} does not match Issue number "
-                f"{source.issue_number}"
+                f"record.card={record.card} does not match Issue number " f"{source.issue_number}"
             ),
         )
     return None
@@ -86,8 +87,7 @@ def check_exact_head(
         return ValidationIssue(
             reason=QuarantineReason.STALE_HEAD,
             message=(
-                f"record head {record.head} does not match current artifact head "
-                f"{current_head}"
+                f"record head {record.head} does not match current artifact head " f"{current_head}"
             ),
         )
     return None
@@ -155,9 +155,7 @@ def validate_supersession_graph(
             if target.record.artifact != record.artifact:
                 issues[comment_id] = ValidationIssue(
                     reason=QuarantineReason.CROSS_ARTIFACT_SUPERSESSION,
-                    message=(
-                        f"{record.type} supersession must target the same artifact"
-                    ),
+                    message=(f"{record.type} supersession must target the same artifact"),
                 )
                 continue
 
@@ -165,8 +163,7 @@ def validate_supersession_graph(
             issues[comment_id] = ValidationIssue(
                 reason=QuarantineReason.DUPLICATE_SUPERSESSION,
                 message=(
-                    f"comment {supersedes} is already superseded by "
-                    f"{superseded_by[supersedes]}"
+                    f"comment {supersedes} is already superseded by " f"{superseded_by[supersedes]}"
                 ),
             )
             continue

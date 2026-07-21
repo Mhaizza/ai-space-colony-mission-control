@@ -6,12 +6,17 @@ from datetime import datetime
 from typing import Any
 from uuid import UUID, uuid4
 
-from sqlalchemy import Column, UniqueConstraint
+from sqlalchemy import JSON, Column, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field
 
 from app.core.time import utcnow
 from app.models.base import QueryModel
+
+# JSONB on PostgreSQL (matching the migration + production engine); portable
+# generic JSON elsewhere (e.g. the SQLite engine used by unit tests) so shared
+# metadata create_all does not fail to compile.
+_JSON_PORTABLE = JSON().with_variant(JSONB(), "postgresql")
 
 
 class McProjectionRecord(QueryModel, table=True):
@@ -37,7 +42,7 @@ class McProjectionRecord(QueryModel, table=True):
     tombstoned: bool = Field(default=False)
     payload: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column(JSONB, nullable=False),
+        sa_column=Column(_JSON_PORTABLE, nullable=False),
     )
 
 
@@ -56,7 +61,7 @@ class McQuarantine(QueryModel, table=True):
     message: str = Field(default="", max_length=2048)
     diagnostic: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column(JSONB, nullable=False),
+        sa_column=Column(_JSON_PORTABLE, nullable=False),
     )
 
 
@@ -64,9 +69,7 @@ class McSyncState(QueryModel, table=True):
     """Single-row-ish sync health / cursor state for the GitHub adapter."""
 
     __tablename__ = "mc_sync_state"  # pyright: ignore[reportAssignmentType]
-    __table_args__ = (
-        UniqueConstraint("adapter_key", name="uq_mc_sync_state_adapter_key"),
-    )
+    __table_args__ = (UniqueConstraint("adapter_key", name="uq_mc_sync_state_adapter_key"),)
 
     id: UUID = Field(default_factory=uuid4, primary_key=True)
     adapter_key: str = Field(default="github", max_length=64)
@@ -78,5 +81,5 @@ class McSyncState(QueryModel, table=True):
     consecutive_failures: int = Field(default=0)
     meta: dict[str, Any] = Field(
         default_factory=dict,
-        sa_column=Column("metadata", JSONB, nullable=False),
+        sa_column=Column("metadata", _JSON_PORTABLE, nullable=False),
     )

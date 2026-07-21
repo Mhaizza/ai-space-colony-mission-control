@@ -57,6 +57,9 @@ class Settings(BaseSettings):
     github_mission_control_owner: str = "Mhaizza"
     github_mission_control_repo: str = "ai-space-colony-mission-control"
     github_poll_interval_seconds: int = Field(default=15, ge=15, le=300)
+    # Fail-closed startup probes are mandatory when the adapter is enabled.
+    # Retained only so that an explicit attempt to disable them is rejected
+    # (there is no supported bypass). Must be true whenever GITHUB_PAT is set.
     github_run_startup_probes: bool = True
     mc_principal_registry_json: str = ""
 
@@ -140,6 +143,14 @@ class Settings(BaseSettings):
         if self.github_pat.strip():
             # Validate principal registry JSON eagerly when adapter credentials exist.
             parse_principal_registry_json(self.mc_principal_registry_json)
+            # No startup-probe bypass: exact scope + capability probes must always
+            # run before any adapter activity (ADR-23 D5, fail-closed startup).
+            if not self.github_run_startup_probes:
+                raise ValueError(
+                    "GITHUB_RUN_STARTUP_PROBES cannot be disabled while the GitHub "
+                    "adapter is enabled (GITHUB_PAT set). Startup scope/capability "
+                    "probes are mandatory and fail-closed (ADR-23 D5).",
+                )
 
         base_url = self.base_url.strip()
         if not base_url:

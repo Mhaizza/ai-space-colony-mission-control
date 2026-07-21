@@ -94,9 +94,7 @@ WORKER_IDS: Final[frozenset[str]] = frozenset(
     }
 )
 
-ASSIGNMENT_WORKER_IDS: Final[frozenset[str]] = frozenset(
-    {"codex", "claude", "cursor", "openclaw"}
-)
+ASSIGNMENT_WORKER_IDS: Final[frozenset[str]] = frozenset({"codex", "claude", "cursor", "openclaw"})
 
 REVIEW_RESULTS: Final[frozenset[str]] = frozenset({"approved", "revisions_required"})
 

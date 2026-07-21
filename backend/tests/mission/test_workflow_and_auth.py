@@ -18,13 +18,12 @@ from app.mission.types import QuarantineReason
 from app.mission.validation import (
     CandidateRecord,
     CommentSourceMeta,
+    _would_create_cycle,
     check_edited_comment,
     check_exact_head,
     validate_supersession_graph,
-    _would_create_cycle,
 )
 from app.mission.workflow_record import ParsedWorkflowRecord, parse_workflow_record_from_comment
-
 
 REGISTRY_JSON = """
 {
@@ -82,9 +81,7 @@ def test_parse_all_six_record_types() -> None:
         ),
         "human_approval": (
             '{"type":"human_approval","card":148,"worker":"human","role":"human-owner",'
-            '"artifact":"pr:self#1","head":"'
-            + ("b" * 40)
-            + '","result":null,"supersedes":null}'
+            '"artifact":"pr:self#1","head":"' + ("b" * 40) + '","result":null,"supersedes":null}'
         ),
         "kanban_update": (
             '{"type":"kanban_update","card":148,"worker":"cursor","role":"technical-director",'
@@ -170,9 +167,7 @@ def test_edited_comment_quarantine() -> None:
 def test_stale_head_quarantine() -> None:
     payload = (
         '{"type":"review_result","card":148,"worker":"chatgpt-reviewer","role":"qa-reviewer",'
-        '"artifact":"pr:self#9","head":"'
-        + ("a" * 40)
-        + '","result":"approved","supersedes":null}'
+        '"artifact":"pr:self#9","head":"' + ("a" * 40) + '","result":"approved","supersedes":null}'
     )
     parsed = parse_workflow_record_from_comment(_comment(_marker(payload)))
     assert parsed.record is not None

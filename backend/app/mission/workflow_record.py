@@ -17,8 +17,8 @@ from app.mission.types import (
     ASSIGNMENT_WORKER_IDS,
     RECORD_FIELDS,
     RECORD_TYPES,
-    REVIEW_RESULTS,
     REPO_QUALIFIERS,
+    REVIEW_RESULTS,
     ROLE_HUMAN_OWNER,
     ROLE_QA_REVIEWER,
     WORKER_IDS,
@@ -201,8 +201,10 @@ def parse_artifact_ref(value: str) -> tuple[ArtifactRefParsed | None, str | None
         return None, "artifact path: rejects absolute paths"
     if "\\" in raw_value:
         return None, "artifact path: rejects backslashes"
-    if re.search(r"%2e", raw_value, re.I) or re.search(r"%2f", raw_value, re.I) or re.search(
-        r"%5c", raw_value, re.I
+    if (
+        re.search(r"%2e", raw_value, re.I)
+        or re.search(r"%2f", raw_value, re.I)
+        or re.search(r"%5c", raw_value, re.I)
     ):
         return None, "artifact path: rejects percent-encoded traversal"
     segments = raw_value.split("/")
@@ -228,13 +230,23 @@ def parse_workflow_record_from_comment(comment_body: str) -> ParseResult:
         return ParseResult(
             ok=False,
             record=None,
-            findings=(Finding("record.extract", "comment must contain exactly one ai-workflow-record:v1 marker"),),
+            findings=(
+                Finding(
+                    "record.extract",
+                    "comment must contain exactly one ai-workflow-record:v1 marker",
+                ),
+            ),
         )
     if len(markers) > 1:
         return ParseResult(
             ok=False,
             record=None,
-            findings=(Finding("record.extract", "comment must contain exactly one ai-workflow-record:v1 marker"),),
+            findings=(
+                Finding(
+                    "record.extract",
+                    "comment must contain exactly one ai-workflow-record:v1 marker",
+                ),
+            ),
             payload_text=markers[0],
         )
     return parse_workflow_record_payload(markers[0])
@@ -280,9 +292,7 @@ def parse_workflow_record_payload(payload_text: str) -> ParseResult:
     missing = expected - keys
     extra = keys - expected
     if missing:
-        findings.append(
-            Finding("record.fields", f"missing required fields: {sorted(missing)}")
-        )
+        findings.append(Finding("record.fields", f"missing required fields: {sorted(missing)}"))
     if extra:
         findings.append(
             Finding("record.fields", f"unknown fields are not allowed: {sorted(extra)}")
@@ -530,9 +540,7 @@ def _validate_nullability(record: dict[str, Any], findings: list[Finding]) -> No
                 )
             )
     elif record_type in {"kanban_update", "completion"}:
-        if expect_present("worker") and record["worker"] not in (
-            ASSIGNMENT_WORKER_IDS | {"human"}
-        ):
+        if expect_present("worker") and record["worker"] not in (ASSIGNMENT_WORKER_IDS | {"human"}):
             findings.append(
                 Finding(
                     "record.worker",

@@ -43,11 +43,7 @@ class PrincipalRegistry:
         return [e for e in self.entries_by_login.values() if e.trust_class == "reviewer"]
 
     def registered_worker_identities(self) -> frozenset[str]:
-        return frozenset(
-            e.worker_identity
-            for e in self.workers()
-            if e.worker_identity is not None
-        )
+        return frozenset(e.worker_identity for e in self.workers() if e.worker_identity is not None)
 
 
 _EMPTY: Final[PrincipalRegistry] = PrincipalRegistry(entries_by_login={})
@@ -98,9 +94,7 @@ def parse_principal_registry_json(raw: str) -> PrincipalRegistry:
         entry = _parse_entry(item)
         login_key = entry.github_login.lower()
         if login_key in seen_logins:
-            raise ValueError(
-                f"Duplicate github_login in principal registry: {entry.github_login}"
-            )
+            raise ValueError(f"Duplicate github_login in principal registry: {entry.github_login}")
         seen_logins.add(login_key)
         entries[login_key] = entry
 
@@ -117,9 +111,7 @@ def _parse_entry(item: object) -> PrincipalEntry:
     if not isinstance(login, str) or not login.strip():
         raise ValueError("principal.github_login must be a non-empty string")
     if trust not in {"worker", "human", "reviewer"}:
-        raise ValueError(
-            f"principal.trust_class must be worker|human|reviewer; got {trust!r}"
-        )
+        raise ValueError(f"principal.trust_class must be worker|human|reviewer; got {trust!r}")
 
     if trust == "worker":
         identity = item.get("worker_identity")
@@ -147,15 +139,11 @@ def _parse_entry(item: object) -> PrincipalEntry:
         if not isinstance(declarable_raw, list) or not all(
             isinstance(d, str) for d in declarable_raw
         ):
-            raise ValueError(
-                "worker principal.declarable_identities must be an array of strings"
-            )
+            raise ValueError("worker principal.declarable_identities must be an array of strings")
         declarable: set[WorkerIdentity] = set()
         for d in declarable_raw:
             if d not in ASSIGNMENT_WORKER_IDS:
-                raise ValueError(
-                    f"declarable_identities entry must be Worker-class; got {d!r}"
-                )
+                raise ValueError(f"declarable_identities entry must be Worker-class; got {d!r}")
             declarable.add(cast(WorkerIdentity, d))
         worker_identity = cast(WorkerIdentity, identity)
         return PrincipalEntry(

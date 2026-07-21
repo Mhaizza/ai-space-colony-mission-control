@@ -80,9 +80,7 @@ def _authorize_start_task(
             return AuthDecision(
                 ok=False,
                 reason=QuarantineReason.INVALID_WORKER_ROLE_PAIR,
-                message=(
-                    f"role {record.role!r} is not allowlisted for worker {record.worker!r}"
-                ),
+                message=(f"role {record.role!r} is not allowlisted for worker {record.worker!r}"),
                 principal=principal,
             )
         return AuthDecision(ok=True, reason=None, message="ok", principal=principal)
@@ -139,9 +137,7 @@ def _authorize_handoff(
             return AuthDecision(
                 ok=False,
                 reason=QuarantineReason.INVALID_WORKER_ROLE_PAIR,
-                message=(
-                    f"role {record.role!r} is not allowlisted for worker {record.worker!r}"
-                ),
+                message=(f"role {record.role!r} is not allowlisted for worker {record.worker!r}"),
                 principal=principal,
             )
         return AuthDecision(ok=True, reason=None, message="ok", principal=principal)
@@ -154,10 +150,7 @@ def _authorize_handoff(
             principal=principal,
         )
 
-    if (
-        effective_worker_identity is None
-        or principal.worker_identity != effective_worker_identity
-    ):
+    if effective_worker_identity is None or principal.worker_identity != effective_worker_identity:
         return AuthDecision(
             ok=False,
             reason=QuarantineReason.UNAUTHORIZED_AUTHOR,
@@ -220,8 +213,7 @@ def _authorize_kanban_or_completion(
                 ok=False,
                 reason=QuarantineReason.INVALID_WORKER_ROLE_PAIR,
                 message=(
-                    f"{record.type} authored by Human requires worker=human and "
-                    "role=human-owner"
+                    f"{record.type} authored by Human requires worker=human and " "role=human-owner"
                 ),
                 principal=principal,
             )
@@ -235,10 +227,7 @@ def _authorize_kanban_or_completion(
             principal=principal,
         )
 
-    if (
-        effective_worker_identity is None
-        or principal.worker_identity != effective_worker_identity
-    ):
+    if effective_worker_identity is None or principal.worker_identity != effective_worker_identity:
         return AuthDecision(
             ok=False,
             reason=QuarantineReason.UNAUTHORIZED_AUTHOR,
