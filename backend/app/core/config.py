@@ -11,6 +11,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from app.core.auth_mode import AuthMode
 from app.core.rate_limit_backend import RateLimitBackend
+from app.mission.principal_registry import parse_principal_registry_json
 
 BACKEND_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_ENV_FILE = BACKEND_ROOT / ".env"
@@ -46,6 +47,21 @@ class Settings(BaseSettings):
     # ADR-23 D8: inherited write/action routes must remain hard-disabled.
     # Startup fails closed when mutating routes are present and this is false.
     mutations_hard_disabled: bool = True
+
+    # Slice 3: server-only GitHub adapter (ADR-23 D5). Empty PAT disables adapter.
+    github_pat: str = ""
+    github_project_owner: str = "Mhaizza"
+    github_project_number: int = Field(default=4, ge=1)
+    github_self_owner: str = "Mhaizza"
+    github_self_repo: str = "ai-space-colony-sim"
+    github_mission_control_owner: str = "Mhaizza"
+    github_mission_control_repo: str = "ai-space-colony-mission-control"
+    github_poll_interval_seconds: int = Field(default=15, ge=15, le=300)
+    # Fail-closed startup probes are mandatory when the adapter is enabled.
+    # Retained only so that an explicit attempt to disable them is rejected
+    # (there is no supported bypass). Must be true whenever GITHUB_PAT is set.
+    github_run_startup_probes: bool = True
+    mc_principal_registry_json: str = ""
 
     # Clerk auth (auth only; roles stored in DB)
     clerk_secret_key: str = ""
@@ -95,6 +111,11 @@ class Settings(BaseSettings):
     request_log_slow_ms: int = Field(default=1000, ge=0)
     request_log_include_health: bool = False
 
+    @property
+    def github_adapter_enabled(self) -> bool:
+        """Adapter is active only when a server-only PAT is configured."""
+        return bool(self.github_pat.strip())
+
     @model_validator(mode="after")
     def _defaults(self) -> Self:
         if self.auth_mode == AuthMode.CLERK:
@@ -118,6 +139,18 @@ class Settings(BaseSettings):
                 "MUTATIONS_HARD_DISABLED must be true. Write/action routes cannot be "
                 "enabled without an ADR-23 revision (D8).",
             )
+
+        if self.github_pat.strip():
+            # Validate principal registry JSON eagerly when adapter credentials exist.
+            parse_principal_registry_json(self.mc_principal_registry_json)
+            # No startup-probe bypass: exact scope + capability probes must always
+            # run before any adapter activity (ADR-23 D5, fail-closed startup).
+            if not self.github_run_startup_probes:
+                raise ValueError(
+                    "GITHUB_RUN_STARTUP_PROBES cannot be disabled while the GitHub "
+                    "adapter is enabled (GITHUB_PAT set). Startup scope/capability "
+                    "probes are mandatory and fail-closed (ADR-23 D5).",
+                )
 
         base_url = self.base_url.strip()
         if not base_url:

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 from fastapi.routing import APIRoute
 from starlette.responses import Response
+
+from app.mission.types import MANUAL_REFRESH_ALLOWLIST_ENTRY
 
 if TYPE_CHECKING:  # pragma: no cover
     from fastapi import FastAPI
@@ -17,6 +19,9 @@ MUTATIONS_DISABLED_CODE = "mutations_hard_disabled"
 MUTATIONS_DISABLED_MESSAGE = (
     "Write/action routes are hard-disabled (ADR-23 D8). " "No action capability is available."
 )
+
+# Exactly one explicit exception: D3 manual refresh (read-only outbound sync).
+MUTATION_ALLOWLIST: Final[frozenset[tuple[str, str]]] = frozenset({MANUAL_REFRESH_ALLOWLIST_ENTRY})
 
 
 def inventory_mutating_routes(app: FastAPI) -> list[tuple[str, str]]:
@@ -47,6 +52,14 @@ def enforce_mutations_hard_disabled(app: FastAPI, *, hard_disabled: bool) -> Non
         )
 
 
+def _normalize_path(path: str) -> str:
+    if not path:
+        return "/"
+    if path != "/" and path.endswith("/"):
+        return path.rstrip("/")
+    return path
+
+
 class MutationHardDisableMiddleware:
     """Reject mutating HTTP methods when write/action routes are hard-disabled."""
 
@@ -60,6 +73,11 @@ class MutationHardDisableMiddleware:
             and scope["type"] == "http"
             and str(scope.get("method", "")).upper() in MUTATING_METHODS
         ):
+            method = str(scope.get("method", "")).upper()
+            path = _normalize_path(str(scope.get("path", "")))
+            if (method, path) in MUTATION_ALLOWLIST:
+                await self._app(scope, receive, send)
+                return
             response = Response(
                 content=json.dumps(
                     {
