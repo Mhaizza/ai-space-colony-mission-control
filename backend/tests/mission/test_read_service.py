@@ -3,13 +3,18 @@
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 import pytest
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
+from sqlmodel import SQLModel
+from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.core.time import utcnow
 from app.mission import read_service
 from app.models.mc_projection import McProjectionRecord, McQuarantine, McSyncState
+from app.models.mc_sync_audit import McSyncAudit
 
 
 class FakeResult:
@@ -226,3 +231,132 @@ def test_parse_iso_handles_bad_input() -> None:
     assert read_service._parse_iso("not-a-date") is None
     parsed = read_service._parse_iso("2026-07-20T00:00:00Z")
     assert parsed == datetime(2026, 7, 20, 0, 0, 0)
+
+
+# --- Slice 4 audit / PR-status read services (real in-memory DB) ---------------
+# SQL-level contracts (limit, ordering, source-type filter, tombstone exclusion,
+# and the payload-leak invariant) require a real engine, not an echo fake.
+
+NOW = utcnow()
+
+
+async def _seeded_session(*rows: Any) -> AsyncSession:
+    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+    async with engine.connect() as conn, conn.begin():
+        await conn.run_sync(SQLModel.metadata.create_all)
+    maker = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    session = maker()
+    for row in rows:
+        session.add(row)
+    await session.commit()
+    return session
+
+
+def _audit(minutes_ago: int, *, is_partial: bool = False) -> McSyncAudit:
+    return McSyncAudit(
+        adapter_key="github",
+        started_at=NOW - timedelta(minutes=minutes_ago),
+        finished_at=NOW,
+        is_partial=is_partial,
+        projected=minutes_ago,
+        quarantined=0,
+        tombstoned=0,
+        error_summary=None,
+    )
+
+
+def _projection(source_type: str, source_id: str, *, tombstoned: bool, payload: Any) -> McProjectionRecord:
+    return McProjectionRecord(
+        source_type=source_type,
+        source_id=source_id,
+        partition_key="p",
+        tombstoned=tombstoned,
+        projected_at=NOW,
+        payload=payload,
+    )
+
+
+@pytest.mark.asyncio
+async def test_get_audit_summary_is_empty_safe() -> None:
+    session = await _seeded_session()
+    summary = await read_service.get_audit_summary(session)
+    assert summary.total == 0
+    assert summary.recent == []
+
+
+@pytest.mark.asyncio
+async def test_get_audit_summary_total_order_and_limit() -> None:
+    # 12 rows; minutes_ago 0 is the newest (started_at desc).
+    session = await _seeded_session(*[_audit(i, is_partial=bool(i % 2)) for i in range(12)])
+    summary = await read_service.get_audit_summary(session)
+
+    assert summary.total == 12
+    assert len(summary.recent) == 10  # DEFAULT_AUDIT_LIMIT
+    # Descending by started_at: newest (projected==0) first, then 1, 2, ...
+    assert [e.projected for e in summary.recent] == list(range(10))
+
+
+@pytest.mark.asyncio
+async def test_get_pr_status_summary_filters_to_ci_types_and_live_rows() -> None:
+    session = await _seeded_session(
+        _projection("github_check_run", "cr1", tombstoned=False, payload={"status": "completed"}),
+        _projection("github_check_suite", "cs1", tombstoned=False, payload={"status": "queued"}),
+        _projection("github_commit_status", "st1", tombstoned=False, payload={"state": "success"}),
+        _projection("github_workflow_run", "wr1", tombstoned=False, payload={"status": "in_progress"}),
+        # Excluded: wrong source types
+        _projection("github_pull_request", "pr1", tombstoned=False, payload={"state": "open"}),
+        _projection("github_issue", "i1", tombstoned=False, payload={"state": "open"}),
+        # Excluded: tombstoned CI row
+        _projection("github_check_run", "cr2", tombstoned=True, payload={"status": "completed"}),
+    )
+    summary = await read_service.get_pr_status_summary(session)
+
+    assert summary.total == 4
+    assert len(summary.items) == 4
+    assert {item.source_type for item in summary.items} == {
+        "github_check_run",
+        "github_check_suite",
+        "github_commit_status",
+        "github_workflow_run",
+    }
+
+
+@pytest.mark.asyncio
+async def test_get_pr_status_summary_maps_state_and_check_status() -> None:
+    session = await _seeded_session(
+        _projection("github_commit_status", "st1", tombstoned=False, payload={"state": "success"}),
+        _projection(
+            "github_check_run",
+            "cr1",
+            tombstoned=False,
+            payload={"status": "completed", "conclusion": "failure"},
+        ),
+    )
+    summary = await read_service.get_pr_status_summary(session)
+    by_id = {item.source_id: item for item in summary.items}
+
+    # commit_status → state; conclusion has no value here.
+    assert by_id["st1"].state == "success"
+    assert by_id["st1"].check_status is None
+    # check_run → terminal conclusion preferred over the run-phase status.
+    assert by_id["cr1"].state is None
+    assert by_id["cr1"].check_status == "failure"
+
+
+@pytest.mark.asyncio
+async def test_get_pr_status_summary_never_leaks_payload() -> None:
+    # Regression guard for the ADR-23 read-model invariant: raw payload (and any
+    # secret material inside it) must never appear in the response.
+    session = await _seeded_session(
+        _projection(
+            "github_check_run",
+            "cr1",
+            tombstoned=False,
+            payload={"status": "completed", "token": "ghp_xxxxxxxxx", "secret": "s3cr3t"},
+        ),
+    )
+    summary = await read_service.get_pr_status_summary(session)
+
+    dumped = str(summary.model_dump())
+    assert "ghp_" not in dumped
+    assert "s3cr3t" not in dumped

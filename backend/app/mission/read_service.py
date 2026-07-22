@@ -23,11 +23,16 @@ from app.core.time import utcnow
 from app.mission.types import SourceType
 from app.mission.workflow_record import parse_workflow_record_from_comment
 from app.models.mc_projection import McProjectionRecord, McQuarantine, McSyncState
+from app.models.mc_sync_audit import McSyncAudit
 from app.schemas.mission import (
     MissionAdapterStatus,
+    MissionAuditEntry,
+    MissionAuditSummary,
     MissionCard,
     MissionCardKind,
     MissionOverview,
+    MissionPRStatusEntry,
+    MissionPRStatusSummary,
     MissionProjectionSummary,
     MissionQuarantineEntry,
     MissionQuarantineReasonCount,
@@ -43,6 +48,15 @@ WORKFLOW_MARKER = "ai-workflow-record:v1"
 DEFAULT_QUARANTINE_LIMIT = 50
 DEFAULT_CARD_LIMIT = 100
 DEFAULT_RECORD_LIMIT = 100
+DEFAULT_AUDIT_LIMIT = 10
+
+# CI/status projection source types surfaced by the PR-status read view.
+PR_STATUS_SOURCE_TYPES: tuple[str, ...] = (
+    SourceType.GITHUB_CHECK_RUN.value,
+    SourceType.GITHUB_CHECK_SUITE.value,
+    SourceType.GITHUB_COMMIT_STATUS.value,
+    SourceType.GITHUB_WORKFLOW_RUN.value,
+)
 
 
 def _parse_iso(value: object) -> datetime | None:
@@ -164,6 +178,72 @@ async def get_quarantine_summary(
         for row in recent_rows
     ]
     return MissionQuarantineSummary(total=total, by_reason=by_reason, recent=recent)
+
+
+async def get_audit_summary(
+    session: AsyncSession,
+    *,
+    limit: int = DEFAULT_AUDIT_LIMIT,
+) -> MissionAuditSummary:
+    """Return the total sync-run count and the most recent audit entries."""
+    total = int((await session.exec(select(func.count()).select_from(McSyncAudit))).one())
+
+    recent_rows = list(
+        await session.exec(
+            select(McSyncAudit).order_by(col(McSyncAudit.started_at).desc()).limit(limit)
+        )
+    )
+    recent = [
+        MissionAuditEntry(
+            adapter_key=row.adapter_key,
+            started_at=row.started_at,
+            finished_at=row.finished_at,
+            is_partial=row.is_partial,
+            projected=row.projected,
+            quarantined=row.quarantined,
+            tombstoned=row.tombstoned,
+            error_summary=row.error_summary,
+        )
+        for row in recent_rows
+    ]
+    return MissionAuditSummary(total=total, recent=recent)
+
+
+def _pr_status_field(payload: dict[str, Any], key: str) -> str | None:
+    """Pull a single scalar string from a projection payload (never the payload)."""
+    value = payload.get(key)
+    return value if isinstance(value, str) and value else None
+
+
+async def get_pr_status_summary(session: AsyncSession) -> MissionPRStatusSummary:
+    """Return live CI/status projection records (no raw payload exposed)."""
+    rows = list(
+        await session.exec(
+            select(McProjectionRecord)
+            .where(
+                col(McProjectionRecord.source_type).in_(PR_STATUS_SOURCE_TYPES),
+                col(McProjectionRecord.tombstoned).is_(False),
+            )
+            .order_by(col(McProjectionRecord.projected_at).desc())
+        )
+    )
+    items = [
+        MissionPRStatusEntry(
+            source_type=row.source_type,
+            source_id=row.source_id,
+            # commit_status carries ``state``; checks/workflow_runs carry a
+            # ``status`` phase and a terminal ``conclusion`` — prefer conclusion.
+            state=_pr_status_field(row.payload or {}, "state"),
+            check_status=(
+                _pr_status_field(row.payload or {}, "conclusion")
+                or _pr_status_field(row.payload or {}, "status")
+            ),
+            source_url=row.source_url,
+            projected_at=row.projected_at,
+        )
+        for row in rows
+    ]
+    return MissionPRStatusSummary(total=len(items), items=items)
 
 
 def _card_from_project_item(
