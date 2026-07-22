@@ -62,6 +62,9 @@ class Settings(BaseSettings):
     # (there is no supported bypass). Must be true whenever GITHUB_PAT is set.
     github_run_startup_probes: bool = True
     mc_principal_registry_json: str = ""
+    # Slice 4 retention: purge tombstoned projection records older than N days.
+    # Zero or negative disables the purge entirely.
+    mc_retention_tombstone_days: int = 30
 
     # Clerk auth (auth only; roles stored in DB)
     clerk_secret_key: str = ""
