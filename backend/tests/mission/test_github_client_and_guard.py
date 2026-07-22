@@ -17,6 +17,7 @@ from app.core.mutation_guard import (
 )
 from app.mission.github_client import GitHubReadClient
 from app.mission.types import MANUAL_REFRESH_ALLOWLIST_ENTRY, QuarantineReason, SourceType
+from app.models.mc_projection import McProjectionRecord
 
 
 @pytest.mark.asyncio
@@ -165,4 +166,7 @@ async def test_partial_read_does_not_infer_deletion(monkeypatch: pytest.MonkeyPa
     assert result.ok is False
     assert result.errors
     # No tombstones inferred — FakeSession never received tombstone updates.
-    assert all(getattr(obj, "tombstoned", False) is False for obj in session.added)
+    # (Scoped to projection records: McSyncAudit also has a `tombstoned` field,
+    # but there it's an unrelated int counter, not the projection's bool flag.)
+    projection_rows = [obj for obj in session.added if isinstance(obj, McProjectionRecord)]
+    assert all(row.tombstoned is False for row in projection_rows)

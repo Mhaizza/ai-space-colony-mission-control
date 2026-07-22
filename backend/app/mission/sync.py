@@ -143,6 +143,8 @@ class GitHubSyncService:
         self._secrets = [token_for_redaction]
 
     async def run(self, session: AsyncSession) -> SyncResult:
+        from app.mission.audit import write_sync_audit  # local: avoid import cycle
+
         started = utcnow()
         state = await self._get_or_create_state(session)
         state.status = "running"
@@ -170,6 +172,14 @@ class GitHubSyncService:
                 state.last_success_at = utcnow()
             state.last_finished_at = utcnow()
             await session.commit()
+            await write_sync_audit(
+                session,
+                result,
+                adapter_key="github",
+                started_at=started,
+                finished_at=state.last_finished_at,
+                secrets=self._secrets,
+            )
             return result
         except Exception as exc:  # noqa: BLE001 — fail closed into sync state
             result.ok = False
@@ -180,6 +190,14 @@ class GitHubSyncService:
             state.last_error = str(exc)[:2048]
             state.last_finished_at = utcnow()
             await session.commit()
+            await write_sync_audit(
+                session,
+                result,
+                adapter_key="github",
+                started_at=started,
+                finished_at=state.last_finished_at,
+                secrets=self._secrets,
+            )
             return result
 
     async def _get_or_create_state(self, session: AsyncSession) -> McSyncState:

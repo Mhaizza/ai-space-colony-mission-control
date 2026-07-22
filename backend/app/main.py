@@ -47,6 +47,7 @@ from app.mission.github_client import GitHubReadClient
 from app.mission.polling import PollingScheduler
 from app.mission.principal_registry import parse_principal_registry_json
 from app.mission.probes import RepoProbeTarget, run_startup_probes
+from app.mission.retention import purge_tombstoned
 from app.mission.sync import GitHubSyncService, SyncConfig
 from app.schemas.health import HealthStatusResponse
 
@@ -501,6 +502,12 @@ async def _start_github_adapter(fastapi_app: FastAPI) -> None:
             )
             async with async_session_maker() as session:
                 await service.run(session)
+                # Reap aged tombstones after each sync. GC failure must never
+                # fail the poll cycle (T6), so it is isolated from the sync.
+                try:
+                    await purge_tombstoned(session, settings.mc_retention_tombstone_days)
+                except Exception:  # noqa: BLE001 — GC failure must not fail the poll
+                    logger.exception("mission.poller.gc_failed")
 
         poller = PollingScheduler(
             interval_seconds=settings.github_poll_interval_seconds,

@@ -17,7 +17,9 @@ from app.mission.github_client import GitHubReadClient
 from app.mission.principal_registry import parse_principal_registry_json
 from app.mission.sync import GitHubSyncService, SyncConfig
 from app.schemas.mission import (
+    MissionAuditSummary,
     MissionOverview,
+    MissionPRStatusSummary,
     MissionQuarantineSummary,
     MissionWorkflowSummary,
 )
@@ -173,6 +175,43 @@ async def mission_workflow(
         card_limit=card_limit,
         record_limit=record_limit,
     )
+
+
+@router.get(
+    "/audit",
+    response_model=MissionAuditSummary,
+    summary="Read-only sync audit summary",
+    description=(
+        "Sync-run audit total and a recent-entry window from the mc_sync_audit "
+        "table (Slice 4). Reads only; never touches GitHub (ADR-23)."
+    ),
+)
+async def mission_audit(
+    auth: AuthContext = AUTH_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> MissionAuditSummary:
+    """Return the sync-audit summary for dashboard visibility."""
+    _ = auth
+    return await read_service.get_audit_summary(session)
+
+
+@router.get(
+    "/pr-status",
+    response_model=MissionPRStatusSummary,
+    summary="Read-only CI / PR status summary",
+    description=(
+        "Live CI/status projection records (check runs/suites, commit statuses, "
+        "workflow runs) from mc_projection_record. Raw payloads are never exposed "
+        "on the read surface (ADR-23)."
+    ),
+)
+async def mission_pr_status(
+    auth: AuthContext = AUTH_DEP,
+    session: AsyncSession = SESSION_DEP,
+) -> MissionPRStatusSummary:
+    """Return the CI/PR-status summary for dashboard visibility."""
+    _ = auth
+    return await read_service.get_pr_status_summary(session)
 
 
 def mission_adapter_runtime_summary() -> dict[str, Any]:
