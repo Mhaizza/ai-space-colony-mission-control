@@ -150,3 +150,41 @@ class MissionOverview(SQLModel):
     projections: MissionProjectionSummary
     quarantine: MissionQuarantineSummary
     workflow: MissionWorkflowSummary
+
+
+class MissionAuditEntry(SQLModel):
+    """Single completed sync-run audit row (mirrors ``McSyncAudit``)."""
+
+    adapter_key: str
+    started_at: datetime
+    finished_at: datetime | None
+    is_partial: bool
+    projected: int
+    quarantined: int
+    tombstoned: int
+    error_summary: str | None
+
+
+class MissionAuditSummary(SQLModel):
+    """Sync-audit total and a recent-entry window."""
+
+    total: int
+    recent: list[MissionAuditEntry]
+
+
+class MissionPRStatusEntry(SQLModel):
+    """Read-only pull-request status projected from a sync run."""
+
+    source_type: str
+    source_id: str
+    state: str | None
+    check_status: str | None
+    source_url: str | None
+    projected_at: datetime
+
+
+class MissionPRStatusSummary(SQLModel):
+    """Pull-request status total and entry list."""
+
+    total: int
+    items: list[MissionPRStatusEntry]
