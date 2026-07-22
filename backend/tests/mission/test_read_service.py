@@ -265,7 +265,9 @@ def _audit(minutes_ago: int, *, is_partial: bool = False) -> McSyncAudit:
     )
 
 
-def _projection(source_type: str, source_id: str, *, tombstoned: bool, payload: Any) -> McProjectionRecord:
+def _projection(
+    source_type: str, source_id: str, *, tombstoned: bool, payload: Any
+) -> McProjectionRecord:
     return McProjectionRecord(
         source_type=source_type,
         source_id=source_id,
@@ -302,7 +304,9 @@ async def test_get_pr_status_summary_filters_to_ci_types_and_live_rows() -> None
         _projection("github_check_run", "cr1", tombstoned=False, payload={"status": "completed"}),
         _projection("github_check_suite", "cs1", tombstoned=False, payload={"status": "queued"}),
         _projection("github_commit_status", "st1", tombstoned=False, payload={"state": "success"}),
-        _projection("github_workflow_run", "wr1", tombstoned=False, payload={"status": "in_progress"}),
+        _projection(
+            "github_workflow_run", "wr1", tombstoned=False, payload={"status": "in_progress"}
+        ),
         # Excluded: wrong source types
         _projection("github_pull_request", "pr1", tombstoned=False, payload={"state": "open"}),
         _projection("github_issue", "i1", tombstoned=False, payload={"state": "open"}),
