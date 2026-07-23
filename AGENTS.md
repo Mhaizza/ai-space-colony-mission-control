@@ -37,3 +37,16 @@
 ## Security & Configuration Tips
 - Never commit secrets. Copy from `.env.example` and keep real values in local `.env`.
 - Report vulnerabilities privately via GitHub security advisories, not public issues.
+
+## Cursor Cloud specific instructions
+This environment has no Docker and no systemd. Postgres 16 and Redis 7 are installed natively (via apt) instead of via `compose.yml`. The update script only refreshes deps (`uv sync` for `backend`, `npm install` for `frontend`); everything below must be done per session.
+
+- Start datastores each session (systemd is not running):
+  - `sudo pg_ctlcluster 16 main start`
+  - `sudo redis-server /etc/redis/redis.conf --daemonize yes`
+- Postgres is reachable at `postgresql+psycopg://postgres:postgres@localhost:5432/mission_control` (role password `postgres`, db `mission_control`). If the db is missing, recreate with `sudo -u postgres createdb mission_control`. Data (and applied migrations) persist in the VM snapshot.
+- Env files `.env`, `backend/.env`, `frontend/.env` are gitignored. If absent, recreate from the `*.env.example` files, then run `python scripts/ensure_local_auth_env.py` to generate `LOCAL_AUTH_TOKEN`, and set `BASE_URL=http://localhost:8000` in `backend/.env` (the example ships it blank, which fails startup). In dev, `DB_AUTO_MIGRATE=true` makes the backend run Alembic on startup.
+- Run services (see `backend/README.md` and root `README.md` for the standard commands): backend `cd backend && uv run uvicorn app.main:app --reload --port 8000`; frontend `cd frontend && npm run dev`. Health: `GET /healthz`.
+- Auth is local bearer-token mode. Log in at `/sign-in` by pasting `LOCAL_AUTH_TOKEN` from `backend/.env`; the frontend validates it via `GET /api/v1/users/me`. The token is kept in `sessionStorage` (`mc_local_auth_token`) plus an in-memory var, so a full reload is needed to fully log out.
+- The app is intentionally read-only: `MUTATIONS_HARD_DISABLED=true` is required (startup fails if false), so all POST/PUT/PATCH/DELETE return HTTP 405 `mutations_hard_disabled` except the single mission manual-refresh route. Onboarding "Save Profile" and other writes failing this way is expected, not an environment bug.
+- The GitHub adapter stays disabled unless `GITHUB_PAT` is set; leaving it empty is normal for local dev.
