@@ -12,11 +12,17 @@ import { DashboardShell } from "@/components/templates/DashboardShell";
 import { SignedOutPanel } from "@/components/auth/SignedOutPanel";
 import { ApiError } from "@/api/mutator";
 import {
+  type missionAuditApiV1MissionAuditGetResponse,
   type missionOverviewApiV1MissionOverviewGetResponse,
+  type missionPrStatusApiV1MissionPrStatusGetResponse,
+  useMissionAuditApiV1MissionAuditGet,
   useMissionOverviewApiV1MissionOverviewGet,
+  useMissionPrStatusApiV1MissionPrStatusGet,
 } from "@/api/generated/mission/mission";
 import type {
+  MissionAuditEntry,
   MissionCard,
+  MissionPRStatusEntry,
   MissionQuarantineEntry,
   MissionSourceTypeCount,
   MissionWorkflowRecordSummary,
@@ -157,6 +163,44 @@ export default function MissionControlPage() {
   const overview =
     overviewQuery.data?.status === 200 ? overviewQuery.data.data : null;
 
+  const auditQuery = useMissionAuditApiV1MissionAuditGet<
+    missionAuditApiV1MissionAuditGetResponse,
+    ApiError
+  >(
+    {
+      query: {
+        enabled: Boolean(isSignedIn),
+        refetchInterval: 15_000,
+        refetchOnMount: "always",
+      },
+    },
+  );
+  const audit = auditQuery.data?.status === 200 ? auditQuery.data.data : null;
+
+  const prStatusQuery = useMissionPrStatusApiV1MissionPrStatusGet<
+    missionPrStatusApiV1MissionPrStatusGetResponse,
+    ApiError
+  >(
+    {
+      query: {
+        enabled: Boolean(isSignedIn),
+        refetchInterval: 15_000,
+        refetchOnMount: "always",
+      },
+    },
+  );
+  const prStatus =
+    prStatusQuery.data?.status === 200 ? prStatusQuery.data.data : null;
+
+  const auditRecent = useMemo<MissionAuditEntry[]>(
+    () => audit?.recent ?? [],
+    [audit],
+  );
+  const prStatusItems = useMemo<MissionPRStatusEntry[]>(
+    () => prStatus?.items ?? [],
+    [prStatus],
+  );
+
   const sourceCounts = useMemo<MissionSourceTypeCount[]>(
     () => overview?.projections.by_source_type ?? [],
     [overview],
@@ -198,7 +242,7 @@ export default function MissionControlPage() {
                   Mission Control
                 </h1>
                 <p className="text-sm text-slate-500">
-                  Read-only projection of the GitHub adapter (Slice 3.5).
+                  Read-only projection of the GitHub adapter (Slice 3.5 + Slice 4).
                 </p>
               </div>
               {adapter ? (
@@ -404,6 +448,95 @@ export default function MissionControlPage() {
                 <EmptyState label="No quarantined records." tone="success" />
               )}
             </section>
+
+            <div className="mt-4 grid grid-cols-1 gap-4 xl:grid-cols-2">
+              <section className="rounded-xl border border-slate-200 bg-white p-4 md:p-6 shadow-sm">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h3 className="text-lg font-semibold text-slate-900">Sync History</h3>
+                  {audit ? (
+                    <span className="text-xs text-slate-500">
+                      {formatCount(audit.total)} total runs
+                    </span>
+                  ) : null}
+                </div>
+                {auditQuery.error ? (
+                  <div className="mb-3 rounded-lg border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
+                    Load failed: {auditQuery.error.message}
+                  </div>
+                ) : null}
+                {auditRecent.length > 0 ? (
+                  <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                    {auditRecent.map((entry, index) => (
+                      <div
+                        key={`${entry.adapter_key}-${entry.started_at}-${index}`}
+                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="min-w-0 truncate font-medium text-slate-900">
+                            {formatRelativeTimestamp(entry.started_at)}
+                          </span>
+                          {entry.is_partial ? (
+                            <StatusBadge tone="offline" label="Partial" />
+                          ) : (
+                            <StatusBadge tone="online" label="Complete" />
+                          )}
+                        </div>
+                        <p className="mt-0.5 truncate text-xs text-slate-500">
+                          {formatCount(entry.projected)} projected ·{" "}
+                          {formatCount(entry.quarantined)} quarantined ·{" "}
+                          {formatCount(entry.tombstoned)} tombstoned
+                          {entry.error_summary ? ` · ${entry.error_summary}` : ""}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState label="No sync runs recorded yet." />
+                )}
+              </section>
+
+              <section className="rounded-xl border border-slate-200 bg-white p-4 md:p-6 shadow-sm">
+                <div className="mb-4 flex items-center justify-between gap-3">
+                  <h3 className="text-lg font-semibold text-slate-900">PR Status</h3>
+                  {prStatus ? (
+                    <span className="text-xs text-slate-500">
+                      {formatCount(prStatus.total)} tracked
+                    </span>
+                  ) : null}
+                </div>
+                {prStatusQuery.error ? (
+                  <div className="mb-3 rounded-lg border border-rose-300 bg-rose-50 p-3 text-sm text-rose-700">
+                    Load failed: {prStatusQuery.error.message}
+                  </div>
+                ) : null}
+                {prStatusItems.length > 0 ? (
+                  <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
+                    {prStatusItems.map((item, index) => (
+                      <div
+                        key={`${item.source_type}-${item.source_id}-${index}`}
+                        className="rounded-lg border border-slate-200 px-3 py-2 text-sm"
+                      >
+                        <div className="flex items-center justify-between gap-3">
+                          <span className="min-w-0 truncate font-mono text-xs text-slate-600">
+                            {item.source_type}
+                          </span>
+                          <span className="shrink-0 text-xs text-slate-500">
+                            {[item.state, item.check_status]
+                              .filter(Boolean)
+                              .join(" · ") || DASH}
+                          </span>
+                        </div>
+                        <p className="mt-0.5 truncate text-xs text-slate-500">
+                          {formatRelativeTimestamp(item.projected_at)}
+                        </p>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyState label="No CI/PR status records yet." />
+                )}
+              </section>
+            </div>
           </div>
         </main>
       </SignedIn>
