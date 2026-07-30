@@ -298,9 +298,28 @@ def _parse_iso_datetime(value: str) -> datetime:
     return datetime.fromisoformat(normalized)
 
 
+MAX_VALIDATION_REGEX_LENGTH = 256
+
+
+def _validate_regex_safety(pattern: str) -> None:
+    """Reject regex patterns that are likely to trigger catastrophic backtracking."""
+    if len(pattern) > MAX_VALIDATION_REGEX_LENGTH:
+        raise ValueError(
+            f"validation_regex is too long (max {MAX_VALIDATION_REGEX_LENGTH} characters)"
+        )
+
+    # Reject common ReDoS-prone constructs like grouped expressions followed by
+    # quantifiers where the group body itself contains quantifiers.
+    if re.search(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]", pattern):
+        raise ValueError(
+            "validation_regex contains unsafe nested quantifiers"
+        )
+
+
 @lru_cache(maxsize=256)
 def _compiled_validation_regex(pattern: str) -> re.Pattern[str]:
     """Compile and cache validation regex patterns for value checks."""
+    _validate_regex_safety(pattern)
     return re.compile(pattern)
 
 
