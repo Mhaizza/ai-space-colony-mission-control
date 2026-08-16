@@ -77,6 +77,7 @@ export * from "./boardWebhookPayloadReadHeaders";
 export * from "./boardWebhookPayloadReadPayload";
 export * from "./boardWebhookRead";
 export * from "./boardWebhookUpdate";
+export * from "./createApprovalApiV1MissionApprovalsPostHeaders";
 export * from "./createApprovalRequest";
 export * from "./createApprovalRequestMissionCardKind";
 export * from "./dashboardKpis";
@@ -236,8 +237,10 @@ export * from "./streamBoardGroupMemoryForBoardApiV1BoardsBoardIdGroupMemoryStre
 export * from "./streamBoardMemoryApiV1BoardsBoardIdMemoryStreamGetParams";
 export * from "./streamTaskCommentFeedApiV1ActivityTaskCommentsStreamGetParams";
 export * from "./streamTasksApiV1BoardsBoardIdTasksStreamGetParams";
+export * from "./submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders";
 export * from "./submitDecisionRequest";
 export * from "./submitDecisionRequestDecision";
+export * from "./supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders";
 export * from "./supersedeDecisionRequest";
 export * from "./supersedeDecisionRequestDecision";
 export * from "./syncGatewayTemplatesApiV1GatewaysGatewayIdTemplatesSyncPostParams";

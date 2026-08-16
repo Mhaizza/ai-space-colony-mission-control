@@ -24,11 +24,14 @@ import type {
   ApprovalDecisionResponse,
   ApprovalDetailResponse,
   ApprovalRequestResponse,
+  CreateApprovalApiV1MissionApprovalsPostHeaders,
   CreateApprovalRequest,
   HTTPValidationError,
   LimitOffsetPageTypeVarCustomizedApprovalListItem,
   ListApprovalsApiV1MissionApprovalsGetParams,
+  SubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders,
   SubmitDecisionRequest,
+  SupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders,
   SupersedeDecisionRequest,
 } from ".././model";
 
@@ -285,6 +288,7 @@ export const getCreateApprovalApiV1MissionApprovalsPostUrl = () => {
 
 export const createApprovalApiV1MissionApprovalsPost = async (
   createApprovalRequest: CreateApprovalRequest,
+  headers: CreateApprovalApiV1MissionApprovalsPostHeaders,
   options?: RequestInit,
 ): Promise<createApprovalApiV1MissionApprovalsPostResponse> => {
   return customFetch<createApprovalApiV1MissionApprovalsPostResponse>(
@@ -292,7 +296,11 @@ export const createApprovalApiV1MissionApprovalsPost = async (
     {
       ...options,
       method: "POST",
-      headers: { "Content-Type": "application/json", ...options?.headers },
+      headers: {
+        "Content-Type": "application/json",
+        ...headers,
+        ...options?.headers,
+      },
       body: JSON.stringify(createApprovalRequest),
     },
   );
@@ -305,14 +313,20 @@ export const getCreateApprovalApiV1MissionApprovalsPostMutationOptions = <
   mutation?: UseMutationOptions<
     Awaited<ReturnType<typeof createApprovalApiV1MissionApprovalsPost>>,
     TError,
-    { data: CreateApprovalRequest },
+    {
+      data: CreateApprovalRequest;
+      headers: CreateApprovalApiV1MissionApprovalsPostHeaders;
+    },
     TContext
   >;
   request?: SecondParameter<typeof customFetch>;
 }): UseMutationOptions<
   Awaited<ReturnType<typeof createApprovalApiV1MissionApprovalsPost>>,
   TError,
-  { data: CreateApprovalRequest },
+  {
+    data: CreateApprovalRequest;
+    headers: CreateApprovalApiV1MissionApprovalsPostHeaders;
+  },
   TContext
 > => {
   const mutationKey = ["createApprovalApiV1MissionApprovalsPost"];
@@ -326,11 +340,18 @@ export const getCreateApprovalApiV1MissionApprovalsPostMutationOptions = <
 
   const mutationFn: MutationFunction<
     Awaited<ReturnType<typeof createApprovalApiV1MissionApprovalsPost>>,
-    { data: CreateApprovalRequest }
+    {
+      data: CreateApprovalRequest;
+      headers: CreateApprovalApiV1MissionApprovalsPostHeaders;
+    }
   > = (props) => {
-    const { data } = props ?? {};
+    const { data, headers } = props ?? {};
 
-    return createApprovalApiV1MissionApprovalsPost(data, requestOptions);
+    return createApprovalApiV1MissionApprovalsPost(
+      data,
+      headers,
+      requestOptions,
+    );
   };
 
   return { mutationFn, ...mutationOptions };
@@ -355,7 +376,10 @@ export const useCreateApprovalApiV1MissionApprovalsPost = <
     mutation?: UseMutationOptions<
       Awaited<ReturnType<typeof createApprovalApiV1MissionApprovalsPost>>,
       TError,
-      { data: CreateApprovalRequest },
+      {
+        data: CreateApprovalRequest;
+        headers: CreateApprovalApiV1MissionApprovalsPostHeaders;
+      },
       TContext
     >;
     request?: SecondParameter<typeof customFetch>;
@@ -364,7 +388,10 @@ export const useCreateApprovalApiV1MissionApprovalsPost = <
 ): UseMutationResult<
   Awaited<ReturnType<typeof createApprovalApiV1MissionApprovalsPost>>,
   TError,
-  { data: CreateApprovalRequest },
+  {
+    data: CreateApprovalRequest;
+    headers: CreateApprovalApiV1MissionApprovalsPostHeaders;
+  },
   TContext
 > => {
   return useMutation(
@@ -667,6 +694,7 @@ export const submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPost =
   async (
     requestId: string,
     submitDecisionRequest: SubmitDecisionRequest,
+    headers: SubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders,
     options?: RequestInit,
   ): Promise<submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostResponse> => {
     return customFetch<submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostResponse>(
@@ -676,7 +704,11 @@ export const submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPost =
       {
         ...options,
         method: "POST",
-        headers: { "Content-Type": "application/json", ...options?.headers },
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+          ...options?.headers,
+        },
         body: JSON.stringify(submitDecisionRequest),
       },
     );
@@ -691,7 +723,11 @@ export const getSubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPos
         >
       >,
       TError,
-      { requestId: string; data: SubmitDecisionRequest },
+      {
+        requestId: string;
+        data: SubmitDecisionRequest;
+        headers: SubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders;
+      },
       TContext
     >;
     request?: SecondParameter<typeof customFetch>;
@@ -702,7 +738,11 @@ export const getSubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPos
       >
     >,
     TError,
-    { requestId: string; data: SubmitDecisionRequest },
+    {
+      requestId: string;
+      data: SubmitDecisionRequest;
+      headers: SubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders;
+    },
     TContext
   > => {
     const mutationKey = [
@@ -722,13 +762,18 @@ export const getSubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPos
           typeof submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPost
         >
       >,
-      { requestId: string; data: SubmitDecisionRequest }
+      {
+        requestId: string;
+        data: SubmitDecisionRequest;
+        headers: SubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders;
+      }
     > = (props) => {
-      const { requestId, data } = props ?? {};
+      const { requestId, data, headers } = props ?? {};
 
       return submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPost(
         requestId,
         data,
+        headers,
         requestOptions,
       );
     };
@@ -762,7 +807,11 @@ export const useSubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPos
           >
         >,
         TError,
-        { requestId: string; data: SubmitDecisionRequest },
+        {
+          requestId: string;
+          data: SubmitDecisionRequest;
+          headers: SubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders;
+        },
         TContext
       >;
       request?: SecondParameter<typeof customFetch>;
@@ -775,7 +824,11 @@ export const useSubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPos
       >
     >,
     TError,
-    { requestId: string; data: SubmitDecisionRequest },
+    {
+      requestId: string;
+      data: SubmitDecisionRequest;
+      headers: SubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPostHeaders;
+    },
     TContext
   > => {
     return useMutation(
@@ -824,6 +877,7 @@ export const supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePos
   async (
     requestId: string,
     supersedeDecisionRequest: SupersedeDecisionRequest,
+    headers: SupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders,
     options?: RequestInit,
   ): Promise<supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostResponse> => {
     return customFetch<supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostResponse>(
@@ -833,7 +887,11 @@ export const supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePos
       {
         ...options,
         method: "POST",
-        headers: { "Content-Type": "application/json", ...options?.headers },
+        headers: {
+          "Content-Type": "application/json",
+          ...headers,
+          ...options?.headers,
+        },
         body: JSON.stringify(supersedeDecisionRequest),
       },
     );
@@ -848,7 +906,11 @@ export const getSupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersede
         >
       >,
       TError,
-      { requestId: string; data: SupersedeDecisionRequest },
+      {
+        requestId: string;
+        data: SupersedeDecisionRequest;
+        headers: SupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders;
+      },
       TContext
     >;
     request?: SecondParameter<typeof customFetch>;
@@ -859,7 +921,11 @@ export const getSupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersede
       >
     >,
     TError,
-    { requestId: string; data: SupersedeDecisionRequest },
+    {
+      requestId: string;
+      data: SupersedeDecisionRequest;
+      headers: SupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders;
+    },
     TContext
   > => {
     const mutationKey = [
@@ -879,13 +945,18 @@ export const getSupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersede
           typeof supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePost
         >
       >,
-      { requestId: string; data: SupersedeDecisionRequest }
+      {
+        requestId: string;
+        data: SupersedeDecisionRequest;
+        headers: SupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders;
+      }
     > = (props) => {
-      const { requestId, data } = props ?? {};
+      const { requestId, data, headers } = props ?? {};
 
       return supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePost(
         requestId,
         data,
+        headers,
         requestOptions,
       );
     };
@@ -919,7 +990,11 @@ export const useSupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersede
           >
         >,
         TError,
-        { requestId: string; data: SupersedeDecisionRequest },
+        {
+          requestId: string;
+          data: SupersedeDecisionRequest;
+          headers: SupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders;
+        },
         TContext
       >;
       request?: SecondParameter<typeof customFetch>;
@@ -932,7 +1007,11 @@ export const useSupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersede
       >
     >,
     TError,
-    { requestId: string; data: SupersedeDecisionRequest },
+    {
+      requestId: string;
+      data: SupersedeDecisionRequest;
+      headers: SupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePostHeaders;
+    },
     TContext
   > => {
     return useMutation(

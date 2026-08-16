@@ -10,6 +10,15 @@ request-scoped session (`get_session`), since they perform no writes.
 `Idempotency-Key` is required on all three mutation routes (the service
 functions accept no default) and is validated here before the service is
 ever called -- a missing/empty header never reaches the service layer.
+
+The header is declared as a *required* FastAPI `Header` parameter (no
+`default=`), not `str | None = Header(default=None)`, so the OpenAPI schema
+-- and therefore the generated Orval client -- accurately describes it as
+required. A wholly missing header is rejected by FastAPI's own request
+validation (422) before the route body ever runs; `_require_idempotency_key`
+exists only to additionally reject a *present but blank/whitespace-only*
+header (400 `idempotency_key_required`), which FastAPI's own string-type
+validation would otherwise accept.
 """
 
 from __future__ import annotations
@@ -55,8 +64,8 @@ _IDEMPOTENCY_KEY_REQUIRED = HTTPException(
 )
 
 
-def _require_idempotency_key(idempotency_key: str | None) -> str:
-    if not idempotency_key or not idempotency_key.strip():
+def _require_idempotency_key(idempotency_key: str) -> str:
+    if not idempotency_key.strip():
         raise _IDEMPOTENCY_KEY_REQUIRED
     return idempotency_key
 
@@ -121,7 +130,7 @@ async def get_approval_detail(
 async def create_approval(
     body: CreateApprovalRequest,
     auth: AuthContext = AUTH_DEP,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
 ) -> ApprovalRequestResponse:
     """Create a new approval request."""
     key = _require_idempotency_key(idempotency_key)
@@ -164,7 +173,7 @@ async def submit_approval_decision(
     request_id: UUID,
     body: SubmitDecisionRequest,
     auth: AuthContext = AUTH_DEP,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
 ) -> ApprovalDecisionResponse:
     """Cast a decision on an open approval request."""
     key = _require_idempotency_key(idempotency_key)
@@ -205,7 +214,7 @@ async def supersede_approval_decision(
     request_id: UUID,
     body: SupersedeDecisionRequest,
     auth: AuthContext = AUTH_DEP,
-    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key"),
+    idempotency_key: str = Header(alias="Idempotency-Key"),
 ) -> ApprovalDecisionResponse:
     """Supersede the caller's own prior decision on an open approval request."""
     key = _require_idempotency_key(idempotency_key)

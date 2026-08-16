@@ -184,14 +184,20 @@ class TestCreateApprovalApi:
     async def test_create_missing_idempotency_key_rejected(
         self, maker: async_sessionmaker[AsyncSession]
     ) -> None:
+        # Idempotency-Key is declared as a *required* FastAPI Header (no
+        # default), so a wholly missing header is rejected by FastAPI's own
+        # request validation (422) before the route body ever runs -- this
+        # is what makes OpenAPI mark it `required: true` and gives the
+        # generated Orval client a typed, non-optional argument. A present
+        # but blank/whitespace-only header still reaches the route body and
+        # is rejected there with the app-level 400 (see the next test).
         await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
         await _seed_policy(maker)
         app = _build_app(maker, auth=_auth_for("creator"))
 
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             response = await client.post("/api/v1/mission/approvals", json=CREATE_BODY)
-        assert response.status_code == 400
-        assert response.json()["detail"]["code"] == "idempotency_key_required"
+        assert response.status_code == 422
 
     @pytest.mark.asyncio
     async def test_create_empty_idempotency_key_rejected(
@@ -277,6 +283,65 @@ class TestDecisionAndSupersedeApi:
         assert body["decision"] == "approve"
 
     @pytest.mark.asyncio
+    async def test_submit_decision_missing_idempotency_key_rejected(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_principal(maker, external_subject="approver", roles=["technical-director"])
+        await _seed_policy(maker)
+
+        app = _build_app(maker, auth=_auth_for("creator"))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            created = await client.post(
+                "/api/v1/mission/approvals", json=CREATE_BODY, headers={"Idempotency-Key": "k1"}
+            )
+            request_id = created.json()["request_id"]
+
+        app2 = _build_app(maker, auth=_auth_for("approver"))
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://test") as client:
+            response = await client.post(
+                f"/api/v1/mission/approvals/{request_id}/decisions",
+                json={"decision": "approve", "reason": None},
+            )
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_supersede_blank_idempotency_key_rejected(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_principal(maker, external_subject="voter", roles=["technical-director"])
+        await _seed_policy(maker)
+
+        app = _build_app(maker, auth=_auth_for("creator"))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            created = await client.post(
+                "/api/v1/mission/approvals", json=CREATE_BODY, headers={"Idempotency-Key": "k1"}
+            )
+            request_id = created.json()["request_id"]
+
+        app2 = _build_app(maker, auth=_auth_for("voter"))
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://test") as client:
+            first_vote = await client.post(
+                f"/api/v1/mission/approvals/{request_id}/decisions",
+                json={"decision": "reject", "reason": "initial"},
+                headers={"Idempotency-Key": "d1"},
+            )
+            decision_id = first_vote.json()["decision_id"]
+
+            response = await client.post(
+                f"/api/v1/mission/approvals/{request_id}/supersede",
+                json={
+                    "supersedes_decision_id": decision_id,
+                    "decision": "approve",
+                    "reason": "resolved",
+                },
+                headers={"Idempotency-Key": "   "},
+            )
+        assert response.status_code == 400
+        assert response.json()["detail"]["code"] == "idempotency_key_required"
+
+    @pytest.mark.asyncio
     async def test_decision_on_unknown_request_returns_404(
         self, maker: async_sessionmaker[AsyncSession]
     ) -> None:
@@ -329,6 +394,37 @@ class TestDecisionAndSupersedeApi:
         body = response.json()
         assert body["decision"] == "approve"
         assert body["decision_id"] != decision_id
+
+
+class TestIdempotencyKeyOpenApiContract:
+    """`Idempotency-Key` must be OpenAPI `required: true` on all three
+    mutation operations -- not merely enforced at runtime -- so the
+    generated Orval client exposes it as a typed, non-optional argument
+    instead of forcing callers to stuff it into generic `RequestInit`
+    headers."""
+
+    def test_idempotency_key_required_on_all_three_mutation_routes(self) -> None:
+        from app.main import app as real_app
+
+        schema = real_app.openapi()
+        mutation_operations = (
+            ("post", "/api/v1/mission/approvals"),
+            ("post", "/api/v1/mission/approvals/{request_id}/decisions"),
+            ("post", "/api/v1/mission/approvals/{request_id}/supersede"),
+        )
+        for method, path in mutation_operations:
+            operation = schema["paths"][path][method]
+            headers = [
+                param
+                for param in operation.get("parameters", [])
+                if param["in"] == "header" and param["name"] == "Idempotency-Key"
+            ]
+            assert (
+                len(headers) == 1
+            ), f"{method.upper()} {path} missing Idempotency-Key header param"
+            assert (
+                headers[0]["required"] is True
+            ), f"{method.upper()} {path} must require Idempotency-Key"
 
 
 class TestReadApi:
