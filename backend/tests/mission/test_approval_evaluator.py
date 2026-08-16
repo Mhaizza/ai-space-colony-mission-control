@@ -43,7 +43,14 @@ def _policy(
         decision_rule=decision_rule,  # type: ignore[arg-type]
         quorum=quorum or _quorum(("a", ["technical-director"]), ("b", ["qa-reviewer"])),
         allowed_approver_principal_types=["human"],
-        allowed_approver_roles=["technical-director", "qa-reviewer"],
+        # Covers every role this test module's quorum/veto fixtures reference
+        # (ApprovalPolicyDefinition now requires both to be subsets of this).
+        allowed_approver_roles=[
+            "technical-director",
+            "qa-reviewer",
+            "world-designer",
+            "ui-ux-engineer",
+        ],
         rejection_behavior=rejection_behavior,  # type: ignore[arg-type]
         expiration=ExpirationConfig(behavior="expire"),
         veto=veto,

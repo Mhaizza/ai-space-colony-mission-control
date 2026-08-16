@@ -126,3 +126,26 @@ class ApprovalPolicyDefinition(BaseModel):
             msg = "veto config is only valid when decision_rule is 'veto'"
             raise ValueError(msg)
         return self
+
+    @model_validator(mode="after")
+    def _quorum_and_veto_roles_subset_of_allowed_approvers(self) -> ApprovalPolicyDefinition:
+        # A quorum slot or a veto-authorized role that isn't itself an
+        # allowed approver role would let a policy require or empower a
+        # vote from a role that can never legally cast one under this same
+        # policy -- an unreachable quorum requirement or a veto grant to a
+        # role that was never authorized to approve in the first place.
+        allowed = set(self.allowed_approver_roles)
+        for slot in self.quorum.slots:
+            outside = sorted(set(slot.eligible_roles) - allowed)
+            if outside:
+                msg = (
+                    f"quorum slot {slot.slot!r} eligible_roles {outside} "
+                    "outside allowed_approver_roles"
+                )
+                raise ValueError(msg)
+        if self.veto is not None:
+            outside = sorted(set(self.veto.veto_authorized_roles) - allowed)
+            if outside:
+                msg = f"veto.veto_authorized_roles {outside} outside allowed_approver_roles"
+                raise ValueError(msg)
+        return self

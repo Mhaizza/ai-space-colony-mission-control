@@ -130,3 +130,48 @@ class TestQuorumStructure:
     def test_empty_eligible_roles_rejected(self) -> None:
         with pytest.raises(ValidationError):
             QuorumSlot(slot="architecture", eligible_roles=[])
+
+
+class TestQuorumAndVetoRolesSubsetOfAllowedApprovers:
+    """A quorum slot or veto role that isn't itself an allowed approver role
+    would require or empower a vote from a role that can never legally cast
+    one under the same policy -- an unreachable requirement or an ungranted
+    veto power. Both must be subsets of allowed_approver_roles."""
+
+    def test_valid_quorum_subset_accepted(self) -> None:
+        ApprovalPolicyDefinition(
+            **_base_kwargs(
+                allowed_approver_roles=["technical-director", "qa-reviewer"],
+                quorum=_quorum(("architecture", ["technical-director"])),
+            )
+        )
+
+    def test_quorum_role_outside_allowlist_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="outside allowed_approver_roles"):
+            ApprovalPolicyDefinition(
+                **_base_kwargs(
+                    allowed_approver_roles=["technical-director"],
+                    quorum=_quorum(("architecture", ["qa-reviewer"])),
+                )
+            )
+
+    def test_valid_veto_subset_accepted(self) -> None:
+        ApprovalPolicyDefinition(
+            **_base_kwargs(
+                decision_rule="veto",
+                allowed_approver_roles=["technical-director", "qa-reviewer"],
+                quorum=_quorum(("architecture", ["technical-director"])),
+                veto=VetoConfig(veto_authorized_roles=["technical-director"]),
+            )
+        )
+
+    def test_veto_role_outside_allowlist_rejected(self) -> None:
+        with pytest.raises(ValidationError, match="outside allowed_approver_roles"):
+            ApprovalPolicyDefinition(
+                **_base_kwargs(
+                    decision_rule="veto",
+                    allowed_approver_roles=["technical-director"],
+                    quorum=_quorum(("architecture", ["technical-director"])),
+                    veto=VetoConfig(veto_authorized_roles=["qa-reviewer"]),
+                )
+            )
