@@ -12,6 +12,16 @@ from app.models.board_webhook_payloads import BoardWebhookPayload
 from app.models.board_webhooks import BoardWebhook
 from app.models.boards import Board
 from app.models.gateways import Gateway
+from app.models.mc_approval import (
+    McApprovalDecision,
+    McApprovalEvent,
+    McApprovalOperation,
+    McApprovalPolicy,
+    McApprovalPolicyActivation,
+    McApprovalRequest,
+    McPrincipal,
+    McPrincipalRole,
+)
 from app.models.mc_projection import McProjectionRecord, McQuarantine, McSyncState
 from app.models.mc_sync_audit import McSyncAudit
 from app.models.organization_board_access import OrganizationBoardAccess
@@ -47,6 +57,14 @@ __all__ = [
     "Gateway",
     "GatewayInstalledSkill",
     "MarketplaceSkill",
+    "McApprovalDecision",
+    "McApprovalEvent",
+    "McApprovalOperation",
+    "McApprovalPolicy",
+    "McApprovalPolicyActivation",
+    "McApprovalRequest",
+    "McPrincipal",
+    "McPrincipalRole",
     "McProjectionRecord",
     "McQuarantine",
     "McSyncState",
