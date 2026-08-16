@@ -17,11 +17,12 @@ from app.core.mutation_guard import (
     MUTATION_ALLOWLIST,
     MUTATIONS_DISABLED_CODE,
     MutationHardDisableMiddleware,
+    _is_allowlisted,
     enforce_mutations_hard_disabled,
     inventory_mutating_routes,
 )
 from app.main import app
-from app.mission.types import MANUAL_REFRESH_ALLOWLIST_ENTRY
+from app.mission.types import CREATE_APPROVAL_ALLOWLIST_ENTRY, MANUAL_REFRESH_ALLOWLIST_ENTRY
 
 BASE_URL = "http://localhost:8000"
 VALID_LOCAL_TOKEN = "a" * 50
@@ -135,17 +136,21 @@ def test_main_app_inventories_mutating_routes_and_blocks_them(
 def test_every_inherited_mutating_route_is_inert(main_client: TestClient) -> None:
     """AC5: every inherited mutation/write route returns no action capability.
 
-    ADR-23 D8 / Slice 3: exactly one allowlisted exception exists —
-    POST /api/v1/mission/refresh (read-only outbound sync trigger).
+    ADR-23 D8: D3's manual-refresh exception. ADR-23 D8a (Slice 5A
+    Checkpoint D): the closed three-route internal-governance-mutation
+    exception -- one literal entry (approval creation) plus two
+    parameterized routes matched via `_is_allowlisted`'s strict
+    UUID-segment pattern (see test_mutation_guard_approvals.py for that
+    matcher's own dedicated tests).
     """
     mutating = inventory_mutating_routes(app)
     assert mutating, "expected inherited mutating routes to still be registered"
-    assert MUTATION_ALLOWLIST == frozenset({MANUAL_REFRESH_ALLOWLIST_ENTRY})
+    assert MUTATION_ALLOWLIST == frozenset(
+        {MANUAL_REFRESH_ALLOWLIST_ENTRY, CREATE_APPROVAL_ALLOWLIST_ENTRY}
+    )
 
     failures: list[str] = []
     for method, path in mutating:
-        if (method, path) in MUTATION_ALLOWLIST:
-            continue
         request_path = path
         for part in path.split("/"):
             if part.startswith("{") and part.endswith("}"):
@@ -153,6 +158,12 @@ def test_every_inherited_mutating_route_is_inert(main_client: TestClient) -> Non
                     part,
                     "00000000-0000-0000-0000-000000000000",
                 )
+        # Check the allowlist against the *substituted* runtime path, exactly
+        # as the middleware itself does -- the raw route template still
+        # contains the literal `{request_id}` placeholder, which the
+        # UUID-segment pattern (correctly) never matches.
+        if _is_allowlisted(method, request_path):
+            continue
         response = main_client.request(method, request_path)
         if response.status_code != 405:
             failures.append(f"{method} {path} -> {response.status_code}")

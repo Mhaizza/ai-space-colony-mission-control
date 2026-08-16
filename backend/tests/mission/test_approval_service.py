@@ -50,6 +50,7 @@ from app.core.config import settings
 from app.core.time import utcnow
 from app.mission.approval_service import (
     ApprovalServiceError,
+    IdempotencyScope,
     create_approval_request,
     submit_decision,
     supersede_decision,
@@ -62,6 +63,16 @@ POLICY_DEFINITION = {
     "quorum": {"slots": [{"slot": "a", "eligible_roles": ["technical-director"]}]},
     "allowed_approver_principal_types": ["human"],
     "allowed_approver_roles": ["technical-director", "qa-reviewer"],
+    "rejection_behavior": "leave_mission_unchanged",
+    "expiration": {"behavior": "expire"},
+}
+
+TRUST_GATED_POLICY_DEFINITION = {
+    "decision_rule": "majority",
+    "quorum": {"slots": [{"slot": "a", "eligible_roles": ["technical-director"]}]},
+    "allowed_approver_principal_types": ["human"],
+    "allowed_approver_roles": ["technical-director", "qa-reviewer"],
+    "trust_requirements": ["trusted"],
     "rejection_behavior": "leave_mission_unchanged",
     "expiration": {"behavior": "expire"},
 }
@@ -117,6 +128,7 @@ async def _seed_principal(
     roles: list[str],
     principal_type: str = "human",
     enabled: bool = True,
+    trust_level: str = "standard",
 ) -> McPrincipal:
     from app.models.mc_approval import McPrincipalRole
 
@@ -124,7 +136,7 @@ async def _seed_principal(
         principal = McPrincipal(
             principal_type=principal_type,
             display_name=external_subject,
-            trust_level="standard",
+            trust_level=trust_level,
             enabled=enabled,
             external_provider="local",
             external_subject=external_subject,
@@ -499,7 +511,7 @@ class TestSubmitDecision:
                 reason=None,
                 idempotency_key="decision-key-2",
             )
-        assert exc_info.value.code == "principal_not_authorized"
+        assert exc_info.value.code == "approval_decision_exists"
 
     @pytest.mark.asyncio
     async def test_decision_on_resolved_request_rejected(
@@ -590,6 +602,118 @@ class TestSubmitDecision:
         async with maker() as session:
             rows = (await session.exec(select(McApprovalDecision))).all()
         assert len(rows) == 1
+
+
+class TestTrustRequirements:
+    @pytest.mark.asyncio
+    async def test_principal_below_trust_requirement_rejected(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_principal(
+            maker,
+            external_subject="approver",
+            roles=["technical-director"],
+            trust_level="standard",
+        )
+        await _seed_policy(maker, definition=TRUST_GATED_POLICY_DEFINITION)
+
+        created = await create_approval_request(
+            _auth("creator"),
+            policy_key="implementation_review",
+            scope_type="action",
+            mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+            mission_card_kind="issue",
+            mission_card_number=16,
+            action_key=None,
+            expires_at=None,
+            idempotency_key="key-1",
+        )
+        with pytest.raises(ApprovalServiceError) as exc_info:
+            await submit_decision(
+                _auth("approver"),
+                request_id=created.request_id,
+                decision="approve",
+                reason=None,
+                idempotency_key="decision-key-1",
+            )
+        assert exc_info.value.code == "principal_trust_insufficient"
+
+    @pytest.mark.asyncio
+    async def test_principal_meeting_trust_requirement_may_vote(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_principal(
+            maker,
+            external_subject="approver",
+            roles=["technical-director"],
+            trust_level="trusted",
+        )
+        await _seed_policy(maker, definition=TRUST_GATED_POLICY_DEFINITION)
+
+        created = await create_approval_request(
+            _auth("creator"),
+            policy_key="implementation_review",
+            scope_type="action",
+            mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+            mission_card_kind="issue",
+            mission_card_number=16,
+            action_key=None,
+            expires_at=None,
+            idempotency_key="key-1",
+        )
+        result = await submit_decision(
+            _auth("approver"),
+            request_id=created.request_id,
+            decision="approve",
+            reason=None,
+            idempotency_key="decision-key-1",
+        )
+        assert result.status == "approved"
+
+    @pytest.mark.asyncio
+    async def test_empty_trust_requirements_does_not_gate(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        # POLICY_DEFINITION has no `trust_requirements` key at all -- absence
+        # (as opposed to an empty list) must not gate either.
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_principal(
+            maker,
+            external_subject="approver",
+            roles=["technical-director"],
+            trust_level="standard",
+        )
+        await _seed_policy(maker, definition=POLICY_DEFINITION)
+
+        created = await create_approval_request(
+            _auth("creator"),
+            policy_key="implementation_review",
+            scope_type="action",
+            mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+            mission_card_kind="issue",
+            mission_card_number=16,
+            action_key=None,
+            expires_at=None,
+            idempotency_key="key-1",
+        )
+        result = await submit_decision(
+            _auth("approver"),
+            request_id=created.request_id,
+            decision="approve",
+            reason=None,
+            idempotency_key="decision-key-1",
+        )
+        assert result.status == "approved"
+
+
+def test_idempotency_scope_values_are_closed_semantic_names() -> None:
+    assert {scope.value for scope in IdempotencyScope} == {
+        "create_request",
+        "submit_decision",
+        "supersede_decision",
+    }
 
 
 class TestSupersedeDecision:
@@ -700,7 +824,7 @@ class TestSupersedeDecision:
                 reason=None,
                 idempotency_key="supersede-key-1",
             )
-        assert exc_info.value.code == "principal_not_authorized"
+        assert exc_info.value.code == "invalid_supersede"
 
     @pytest.mark.asyncio
     async def test_cannot_supersede_already_superseded_decision(
@@ -745,7 +869,7 @@ class TestSupersedeDecision:
                 reason=None,
                 idempotency_key="supersede-key-2",
             )
-        assert exc_info.value.code == "decision_not_effective"
+        assert exc_info.value.code == "invalid_supersede"
         assert second_vote.decision_id != first_vote.decision_id
 
 

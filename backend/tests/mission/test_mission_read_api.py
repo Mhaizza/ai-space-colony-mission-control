@@ -17,7 +17,7 @@ from app.api import mission as mission_api
 from app.core.auth import AuthContext
 from app.core.mutation_guard import MUTATION_ALLOWLIST
 from app.core.time import utcnow
-from app.mission.types import MANUAL_REFRESH_ALLOWLIST_ENTRY
+from app.mission.types import CREATE_APPROVAL_ALLOWLIST_ENTRY, MANUAL_REFRESH_ALLOWLIST_ENTRY
 from app.models.mc_projection import McProjectionRecord
 
 
@@ -171,5 +171,13 @@ def test_mission_slice4_read_routes_registered_as_get() -> None:
 
 
 def test_mutation_allowlist_unchanged_by_slice_3_5() -> None:
-    assert MUTATION_ALLOWLIST == frozenset({MANUAL_REFRESH_ALLOWLIST_ENTRY})
+    # Slice 3.5's read-only dashboard additions added no mutation route --
+    # still true. Slice 5A Checkpoint D (ADR-23 D8a) later added exactly one
+    # more literal entry (approval creation); see
+    # tests/mission/test_github_client_and_guard.py for that assertion in
+    # full, and tests/mission/test_mutation_guard_approvals.py for the two
+    # parameterized D8a routes matched via pattern, not a literal entry.
+    assert MUTATION_ALLOWLIST == frozenset(
+        {MANUAL_REFRESH_ALLOWLIST_ENTRY, CREATE_APPROVAL_ALLOWLIST_ENTRY}
+    )
     assert MANUAL_REFRESH_ALLOWLIST_ENTRY == ("POST", "/api/v1/mission/refresh")

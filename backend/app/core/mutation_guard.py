@@ -1,14 +1,20 @@
-"""Hard-disable inherited mutation/write HTTP routes (ADR-23 D8)."""
+"""Hard-disable inherited mutation/write HTTP routes (ADR-23 D8/D8a)."""
 
 from __future__ import annotations
 
 import json
+import re
 from typing import TYPE_CHECKING, Final
 
 from fastapi.routing import APIRoute
 from starlette.responses import Response
 
-from app.mission.types import MANUAL_REFRESH_ALLOWLIST_ENTRY
+from app.mission.types import (
+    CREATE_APPROVAL_ALLOWLIST_ENTRY,
+    MANUAL_REFRESH_ALLOWLIST_ENTRY,
+    SUBMIT_DECISION_ALLOWLIST_PATH_TEMPLATE,
+    SUPERSEDE_DECISION_ALLOWLIST_PATH_TEMPLATE,
+)
 
 if TYPE_CHECKING:  # pragma: no cover
     from fastapi import FastAPI
@@ -20,8 +26,48 @@ MUTATIONS_DISABLED_MESSAGE = (
     "Write/action routes are hard-disabled (ADR-23 D8). " "No action capability is available."
 )
 
-# Exactly one explicit exception: D3 manual refresh (read-only outbound sync).
-MUTATION_ALLOWLIST: Final[frozenset[tuple[str, str]]] = frozenset({MANUAL_REFRESH_ALLOWLIST_ENTRY})
+# D3's manual refresh, plus D8a's non-parameterized approval-creation route:
+# both are exact literal (method, path) pairs, matched by plain membership.
+MUTATION_ALLOWLIST: Final[frozenset[tuple[str, str]]] = frozenset(
+    {MANUAL_REFRESH_ALLOWLIST_ENTRY, CREATE_APPROVAL_ALLOWLIST_ENTRY}
+)
+
+# D8a's two remaining routes are parameterized by `{request_id}`, so a literal
+# string can never match the real runtime path (which contains an actual
+# UUID). Each entry here requires a *strict* single UUID-shaped path segment
+# between fixed literal components -- never a generic `[^/]+`, which would
+# also match `foo`, `delete`, or any other single segment, and never a
+# multi-segment/prefix wildcard. `fullmatch`, not `search`, so no additional
+# leading/trailing segment can slip through either. This closed pair is the
+# entire parameterized surface ADR-23 D8a authorizes -- adding a fourth
+# mutation route (of either kind) requires an ADR-23 revision, not a code
+# change here.
+_UUID_SEGMENT: Final[str] = (
+    r"[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}"
+)
+
+
+def _compile_parameterized_path(template: str) -> re.Pattern[str]:
+    # `types.py`'s `{request_id}`-templated constants are the single source
+    # of truth for these two paths; substitute the strict UUID pattern for
+    # the placeholder rather than duplicating the literal path here.
+    pattern = re.escape(template).replace(re.escape("{request_id}"), _UUID_SEGMENT)
+    return re.compile(f"^{pattern}$")
+
+
+_MUTATION_ALLOWLIST_PATTERNS: Final[tuple[tuple[str, re.Pattern[str]], ...]] = (
+    ("POST", _compile_parameterized_path(SUBMIT_DECISION_ALLOWLIST_PATH_TEMPLATE)),
+    ("POST", _compile_parameterized_path(SUPERSEDE_DECISION_ALLOWLIST_PATH_TEMPLATE)),
+)
+
+
+def _is_allowlisted(method: str, path: str) -> bool:
+    if (method, path) in MUTATION_ALLOWLIST:
+        return True
+    return any(
+        pattern_method == method and pattern.fullmatch(path) is not None
+        for pattern_method, pattern in _MUTATION_ALLOWLIST_PATTERNS
+    )
 
 
 def inventory_mutating_routes(app: FastAPI) -> list[tuple[str, str]]:
@@ -75,7 +121,7 @@ class MutationHardDisableMiddleware:
         ):
             method = str(scope.get("method", "")).upper()
             path = _normalize_path(str(scope.get("path", "")))
-            if (method, path) in MUTATION_ALLOWLIST:
+            if _is_allowlisted(method, path):
                 await self._app(scope, receive, send)
                 return
             response = Response(

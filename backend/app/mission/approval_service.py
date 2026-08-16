@@ -87,10 +87,12 @@ ApprovalServiceErrorCode = Literal[
     "policy_not_found",
     "policy_invalid",
     "principal_not_authorized",
+    "principal_trust_insufficient",
     "request_not_found",
     "request_not_open",
     "decision_not_found",
-    "decision_not_effective",
+    "approval_decision_exists",
+    "invalid_supersede",
     "idempotency_key_reused_with_different_payload",
 ]
 
@@ -106,9 +108,9 @@ class ApprovalServiceError(Exception):
 class IdempotencyScope(str, Enum):
     """Closed set of idempotency namespaces. Never caller-supplied."""
 
-    CREATE_REQUEST = "POST /api/v1/mission/approvals"
-    SUBMIT_DECISION = "POST /api/v1/mission/approvals/{id}/decisions"
-    SUPERSEDE_DECISION = "POST /api/v1/mission/approvals/{id}/decisions/{decision_id}/supersede"
+    CREATE_REQUEST = "create_request"
+    SUBMIT_DECISION = "submit_decision"
+    SUPERSEDE_DECISION = "supersede_decision"
 
 
 _TERMINAL_STATUSES = frozenset({"approved", "rejected", "expired", "superseded"})
@@ -291,7 +293,7 @@ async def _finalize_operation(
     session.add(op)
 
 
-def _validate_policy_definition(policy: McApprovalPolicy) -> ApprovalPolicyDefinition:
+def validate_policy_definition(policy: McApprovalPolicy) -> ApprovalPolicyDefinition:
     try:
         return ApprovalPolicyDefinition.model_validate(policy.definition)
     except ValidationError as exc:
@@ -315,7 +317,7 @@ async def _load_active_policy(
         raise ApprovalServiceError(
             "policy_not_found", f"no active policy for policy_key={policy_key!r}"
         )
-    return policy, _validate_policy_definition(policy)
+    return policy, validate_policy_definition(policy)
 
 
 def _authorize_decision(principal: ResolvedPrincipal, definition: ApprovalPolicyDefinition) -> None:
@@ -329,9 +331,15 @@ def _authorize_decision(principal: ResolvedPrincipal, definition: ApprovalPolicy
             "principal_not_authorized",
             f"principal {principal.id} holds none of this policy's allowed_approver_roles",
         )
+    if definition.trust_requirements and principal.trust_level not in definition.trust_requirements:
+        raise ApprovalServiceError(
+            "principal_trust_insufficient",
+            f"principal {principal.id} has trust_level={principal.trust_level!r}, "
+            f"not in this policy's trust_requirements {definition.trust_requirements!r}",
+        )
 
 
-async def _effective_decisions(session: AsyncSession, request_id: UUID) -> list[McApprovalDecision]:
+async def effective_decisions(session: AsyncSession, request_id: UUID) -> list[McApprovalDecision]:
     all_decisions = (
         await session.exec(
             select(McApprovalDecision).where(McApprovalDecision.request_id == request_id)
@@ -361,7 +369,7 @@ async def _finalize_decision(
     session.add(new_decision)
     await session.flush()
 
-    effective = await _effective_decisions(session, request.id)
+    effective = await effective_decisions(session, request.id)
     evaluation = evaluate_approval(
         definition,
         [
@@ -561,13 +569,13 @@ async def submit_decision(
 
         policy = await session.get(McApprovalPolicy, request.policy_id)
         assert policy is not None  # guarded by FK
-        definition = _validate_policy_definition(policy)
+        definition = validate_policy_definition(policy)
         _authorize_decision(principal, definition)
 
-        existing_effective = await _effective_decisions(session, request_id)
+        existing_effective = await effective_decisions(session, request_id)
         if any(d.principal_id == principal.id for d in existing_effective):
             raise ApprovalServiceError(
-                "principal_not_authorized",
+                "approval_decision_exists",
                 f"principal {principal.id} already has an effective decision on request {request_id}; "
                 "use supersede_decision to change it",
             )
@@ -648,18 +656,18 @@ async def supersede_decision(
             )
         if prior.principal_id != principal.id:
             raise ApprovalServiceError(
-                "principal_not_authorized", "a principal may only supersede its own decision"
+                "invalid_supersede", "a principal may only supersede its own decision"
             )
 
-        effective = await _effective_decisions(session, request_id)
+        effective = await effective_decisions(session, request_id)
         if prior.id not in {d.id for d in effective}:
             raise ApprovalServiceError(
-                "decision_not_effective", f"decision {decision_id} has already been superseded"
+                "invalid_supersede", f"decision {decision_id} has already been superseded"
             )
 
         policy = await session.get(McApprovalPolicy, request.policy_id)
         assert policy is not None  # guarded by FK
-        definition = _validate_policy_definition(policy)
+        definition = validate_policy_definition(policy)
         _authorize_decision(principal, definition)
 
         new_decision = McApprovalDecision(

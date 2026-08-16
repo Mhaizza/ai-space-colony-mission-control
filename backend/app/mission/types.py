@@ -120,3 +120,20 @@ MANUAL_REFRESH_ALLOWLIST_ENTRY: Final[tuple[str, str]] = (
     "POST",
     "/api/v1/mission/refresh",
 )
+
+# ADR-23 D8a: closed three-route internal-governance-mutation exception
+# (Slice 5A Checkpoint D). `CREATE_APPROVAL` has no path parameter and is a
+# literal allowlist entry, exactly like manual refresh. The two decision
+# routes are parameterized by `{request_id}` and are matched separately in
+# `app.core.mutation_guard` via a strict UUID-segment pattern, never a
+# literal entry -- see that module for why.
+CREATE_APPROVAL_ALLOWLIST_ENTRY: Final[tuple[str, str]] = (
+    "POST",
+    "/api/v1/mission/approvals",
+)
+SUBMIT_DECISION_ALLOWLIST_PATH_TEMPLATE: Final[str] = (
+    "/api/v1/mission/approvals/{request_id}/decisions"
+)
+SUPERSEDE_DECISION_ALLOWLIST_PATH_TEMPLATE: Final[str] = (
+    "/api/v1/mission/approvals/{request_id}/supersede"
+)
