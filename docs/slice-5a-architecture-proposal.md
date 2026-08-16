@@ -7,6 +7,25 @@ This proposal itself is scoped to **Checkpoint A** of the checkpoint-based
 implementation plan below: architecture only, no production code, no
 migration, no route.
 
+**Revision 2** closes ten review findings from Codex's automated review of
+revision 1, plus three raised directly by the Human: multiple roles per
+principal (`mc_principal_role` association, not a single column), a
+deterministic active-policy-version rule (`is_active` flag + partial unique
+index, not an implicit "highest version" inference), and actor provenance on
+`mc_approval_event` (`triggered_by_principal_id`). Also closed: idempotency
+keys now scoped to `(key, principal_id, endpoint)`; expiration reconciliation
+now runs independently of the GitHub-adapter-gated `PollingScheduler`;
+`mc_approval_decision` now snapshots the deciding principal's roles/trust
+level at submission time; the veto decision rule now states its complete
+approval/rejection predicate; `mutation_guard.py`'s literal-path matching is
+flagged as needing route-template-aware matching for D8a's two parameterized
+routes; `ai`-type approvers are explicitly excluded from Slice 5A policies
+pending an authenticated AI decision path; read-route checkpoint placement is
+now consistently Checkpoint D throughout; `POST /approvals` gains an explicit
+`supersedes_request_id` input and a deterministic system-trigger predecessor
+rule; and `mc_approval_request.trigger_key` gains a database uniqueness
+constraint with upsert-based creation.
+
 ## Authority
 
 - Slice 5 direction: Human-approved "Approved Slice 5A Direction" (Trust &
@@ -61,18 +80,18 @@ entirely inside Mission Control, that:
 
 | Area | Change |
 | --- | --- |
-| **Principal domain** | New `mc_principal` table: Mission-Control-owned identity (`human` / `ai` / `system`), with optional external-identity linkage (provenance only, never trusted for authorization). |
+| **Principal domain** | New `mc_principal` table: Mission-Control-owned identity (`human` / `ai` / `system`), with optional external-identity linkage (provenance only, never trusted for authorization). New `mc_principal_role` association table: a principal may hold more than one role. |
 | **Policy domain** | New `mc_approval_policy` table: versioned, immutable-per-version, typed (Pydantic-validated) policy records — decision rule (`majority`/`unanimous`/`veto`), quorum, allowed approver roles/principal types, trust requirements, rejection behavior, expiration behavior. |
 | **Approval persistence** | New `mc_approval_request` (mission- or action-scoped, system- or human-created), `mc_approval_decision` (append-only, immutable, supersedable via `supersedes_decision_id`), `mc_approval_event` (append-only lifecycle events, distinct from decisions). |
 | **Idempotency** | New `mc_approval_operation` table (dedicated, not columns on the domain tables — see Decision Log) for `Idempotency-Key` bookkeeping across all three mutation endpoints. |
 | **Policy evaluator** | Pure domain function `evaluate_approval(policy, request, effective_decisions, now)` — deterministic, no I/O, returns a typed evaluation result. |
-| **Principal resolver / authorization** | Resolves `mc_principal` from `AuthContext` (existing Clerk/local-auth layer), never from a request body; enforces role/trust/enabled checks before policy evaluation. |
+| **Principal resolver / authorization** | Resolves `mc_principal` from `AuthContext` (existing Clerk/local-auth layer), never from a request body; enforces role/trust/enabled checks before policy evaluation. **Slice 5A's resolver covers `human` and `system` principals only** — `AuthContext` is explicitly user-only (`actor_type: Literal["user"]`, verified in `app/core/auth.py`); authenticated agents use the separate `AgentAuthContext` (`app/core/agent_auth.py`), which no route or resolver in this slice consumes. A policy naming an `ai` approver role would therefore include a vote that can never be cast, potentially making its quorum permanently unsatisfiable. `ai` remains a valid persisted `mc_principal.principal_type` (for future data modeling and for `system`-created records attributed to an AI-authored source), but **no policy created in Slice 5A may name an `ai` principal type as an eligible approver** — the policy schema (Checkpoint B) validates this and rejects such a policy. Wiring an authenticated AI decision path via `AgentAuthContext` is deferred to a future slice. |
 | **Approval service** | Transactional orchestration (`BEGIN…SELECT…FOR UPDATE…COMMIT`) for request creation, decision submission, and decision supersession. |
 | **Read APIs** | `GET /api/v1/mission/approvals`, `GET /api/v1/mission/approvals/{request_id}` — frontend-ready derived state (quorum, effective decisions, lifecycle history, current Mission effect). |
 | **Mutation APIs** (Checkpoint D, gated on ADR-23 D8a) | `POST /api/v1/mission/approvals`, `POST /api/v1/mission/approvals/{request_id}/decisions`, `POST /api/v1/mission/approvals/{request_id}/supersede`. |
-| **Expiration/reconciliation** | Server-side periodic tick (extends the existing `PollingScheduler`, already used for Slice 4's retention GC) evaluating `expires_at <= now` for pending requests; bounded `max_auto_retries` for recreate-on-expire. |
+| **Expiration/reconciliation** | Server-side periodic tick evaluating `expires_at <= now` for pending requests; bounded `max_auto_retries` for recreate-on-expire. **Runs on its own scheduled task, started independently from application startup — not by extending the existing `PollingScheduler`.** `PollingScheduler` is instantiated only inside `_start_github_adapter`, which `app/main.py` calls only when `GITHUB_PAT` is configured (verified directly). Approval governance has no dependency on the GitHub adapter being enabled, so tying reconciliation to that conditional startup would silently stop expiring/blocking/recreating approval requests in the explicitly-supported adapter-disabled configuration, or after a PAT is later removed while approval records remain. |
 | **Automatic request triggers** | Deterministic logical-trigger-key (`mission_ref + action_key + head_sha`) hooked into `GitHubSyncService`'s existing result path — read-only observation only, never a new GitHub call. |
-| **Migration** | One additive Alembic migration for the six new tables. |
+| **Migration** | One additive Alembic migration for the seven new tables. |
 
 ### Explicitly out of scope
 
@@ -92,7 +111,8 @@ entirely inside Mission Control, that:
 ### ADR-23 invariants preserved
 
 - `MUTATIONS_HARD_DISABLED=true` remains unchanged; `enforce_mutations_hard_disabled`'s fail-closed startup check is untouched.
-- `MutationHardDisableMiddleware`'s allowlist gains exactly three new entries, and only once ADR-23 revision 16 (D8a) is Accepted — Checkpoints B/C register no route and change no allowlist.
+- `MutationHardDisableMiddleware`'s allowlist gains exactly three new entries, and only once ADR-23 revision 16 (D8a) is Accepted — Checkpoints B/C register no route (read or mutation) and change no allowlist; all API routes, including the two GET routes, are registered in Checkpoint D (see Checkpoint-based implementation plan below — this proposal previously described the read routes inconsistently as "Checkpoint B/C-adjacent," which is corrected here).
+- Two of D8a's three routes are parameterized (`{request_id}`), but `MutationHardDisableMiddleware` currently compares the *concrete runtime* `scope["path"]` against `MUTATION_ALLOWLIST` by literal string equality (verified directly in `app/core/mutation_guard.py`) — a literal `{request_id}` allowlist entry never matches a real UUID path, so those two routes would 405 permanently even when properly authorized. Checkpoint D's `mutation_guard.py` change is therefore not just "add three entries" as originally stated: the matcher itself needs route-template-aware matching (e.g. compiling each parameterized allowlist entry to a path-segment regex, matched against `scope["path"]`) for exactly D8a's two parameterized entries, with the existing literal-match behavior preserved unchanged for D3's and D8a's non-parameterized entry (`POST /api/v1/mission/approvals`).
 - No GitHub mutations, no inbound webhooks, ever, from any Slice 5A component.
 - No credential (GitHub PAT, local-auth token) reaches request/response bodies, logs, audit rows, or persisted approval state.
 - Client-supplied `principal_id`, `role`, `trust_level`, effective approval status, or Mission effect are never accepted — every one of those is server-derived.
@@ -107,19 +127,25 @@ backend/app/mission/
   approval_evaluator.py     # pure evaluate_approval() domain service
   principal_resolver.py     # AuthContext -> McPrincipal (server-side only)
   approval_service.py       # transactional create/decide/supersede orchestration
-  approval_reconciliation.py  # expiration tick, wired into PollingScheduler
+  approval_reconciliation.py  # expiration tick, own scheduled task
+                             # (independent of PollingScheduler/_start_github_adapter)
   approval_triggers.py      # deterministic system-created request triggers
 
 backend/app/models/
-  mc_approval.py            # McPrincipal, McApprovalPolicy, McApprovalRequest,
-                             # McApprovalDecision, McApprovalEvent, McApprovalOperation
+  mc_approval.py            # McPrincipal, McPrincipalRole, McApprovalPolicy,
+                             # McApprovalRequest, McApprovalDecision,
+                             # McApprovalEvent, McApprovalOperation
 
 backend/app/schemas/
   mission_approvals.py      # request/response/read models
 
 backend/app/api/
-  mission_approvals.py      # GET routes (Checkpoint B/C); POST routes added
-                             # only in Checkpoint D, after ADR-23 D8a Accepted
+  mission_approvals.py      # GET and POST routes, all registered in
+                             # Checkpoint D (POST routes additionally gated
+                             # on ADR-23 D8a Accepted; GET routes are not
+                             # ADR-23-gated but are registered at the same
+                             # checkpoint as the rest of this module, per the
+                             # Human-approved checkpoint plan)
 
 backend/migrations/versions/
   <hash>_add_mc_approval_domain.py
@@ -138,7 +164,6 @@ CREATE TABLE mc_principal (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     principal_type      VARCHAR(16)  NOT NULL,   -- human | ai | system
     display_name        VARCHAR(256) NOT NULL,
-    role_slug           VARCHAR(64),              -- from the existing closed RoleSlug registry
     trust_level         VARCHAR(32)  NOT NULL,
     enabled             BOOLEAN      NOT NULL DEFAULT TRUE,
     external_provider   VARCHAR(64),               -- e.g. "clerk"; provenance only
@@ -148,14 +173,37 @@ CREATE TABLE mc_principal (
     UNIQUE (external_provider, external_subject)
 );
 
+-- A principal may legitimately hold more than one role (the Approval
+-- semantics section already requires policies to check role-based quorum
+-- and veto eligibility across a principal's full role set) — modeled as an
+-- association, not a single nullable column on mc_principal.
+CREATE TABLE mc_principal_role (
+    principal_id  UUID NOT NULL REFERENCES mc_principal(id),
+    role_slug     VARCHAR(64) NOT NULL,  -- from the existing closed RoleSlug registry
+    PRIMARY KEY (principal_id, role_slug)
+);
+
 CREATE TABLE mc_approval_policy (
     id                  UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     policy_key          VARCHAR(128) NOT NULL,
     version             INTEGER      NOT NULL,
+    is_active           BOOLEAN      NOT NULL DEFAULT FALSE,
     definition          JSONB        NOT NULL,    -- Pydantic-validated typed shape, never arbitrary
     created_at          TIMESTAMPTZ  NOT NULL,
     UNIQUE (policy_key, version)
 );
+
+-- Deterministic active-version selection: at most one row per policy_key may
+-- have is_active = true. Publishing a new version sets the new row's
+-- is_active = true and the prior active row's is_active = false in the same
+-- transaction — never a query-time "highest version wins" inference, so a
+-- deliberate rollback to an older version is representable. An approval
+-- request resolves policy_key to whichever row currently has is_active =
+-- true at creation time, then pins that row's id (not the key) forever
+-- (see mc_approval_request.policy_id below) — later activation changes
+-- never affect an already-created request.
+CREATE UNIQUE INDEX ux_mc_approval_policy_active
+    ON mc_approval_policy (policy_key) WHERE is_active;
 
 CREATE TABLE mc_approval_request (
     id                       UUID PRIMARY KEY DEFAULT gen_random_uuid(),
@@ -176,12 +224,38 @@ CREATE TABLE mc_approval_request (
     auto_retry_count             INTEGER NOT NULL DEFAULT 0
 );
 
+-- trigger_key is the sole idempotency mechanism for system-created requests
+-- (mission_ref + action_key + head_sha, see Automatic request triggers
+-- below) and must be enforced by the database, not by a SELECT-then-INSERT
+-- race in application code — concurrent polling/manual-refresh overlap, or
+-- multiple application replicas, can both observe "no existing request" for
+-- the same key and both attempt to insert. Creation therefore always goes
+-- through an upsert (`INSERT ... ON CONFLICT (trigger_key) DO NOTHING`,
+-- returning the existing row on conflict), never a plain SELECT-then-INSERT
+-- that has no not-yet-existing row to lock via `SELECT ... FOR UPDATE`.
+-- Each bounded auto-retry (expire -> recreate) obtains a distinct
+-- trigger_key by suffixing the retry count (e.g. `<mission_ref>|<action_key>|<head_sha>|retry:<n>`),
+-- so retries never collide with each other or the original.
+CREATE UNIQUE INDEX ux_mc_approval_request_trigger_key
+    ON mc_approval_request (trigger_key) WHERE trigger_key IS NOT NULL;
+
 CREATE TABLE mc_approval_decision (
     id                    UUID PRIMARY KEY DEFAULT gen_random_uuid(),
     request_id             UUID NOT NULL REFERENCES mc_approval_request(id),
     principal_id            UUID NOT NULL REFERENCES mc_principal(id),
     decision                 VARCHAR(16) NOT NULL,  -- approve | reject
     reason                    TEXT,
+    -- Snapshot of the authorization facts actually used to admit this
+    -- decision, captured at submission time. mc_principal is mutable
+    -- (role membership, trust_level, enabled can all change later); without
+    -- this snapshot, reconstructing a request's history after such a change
+    -- would have to either apply the principal's *current* attributes
+    -- retroactively (silently changing what quorum/veto looked like at the
+    -- time) or have no persisted basis for the policy evaluation this
+    -- decision actually received. role_slugs_at_decision is the principal's
+    -- full mc_principal_role set as of submission, not just one role.
+    role_slugs_at_decision    JSONB NOT NULL,   -- array of role_slug strings
+    trust_level_at_decision   VARCHAR(32) NOT NULL,
     created_at                TIMESTAMPTZ NOT NULL,
     supersedes_decision_id     UUID REFERENCES mc_approval_decision(id)
 );
@@ -193,17 +267,35 @@ CREATE TABLE mc_approval_event (
                                             -- request_approved | request_rejected |
                                             -- request_expired | mission_blocked |
                                             -- request_superseded
+    -- The principal whose action produced this event, when there is one:
+    -- a human/system principal's decision or request creation. NULL for
+    -- events with no single attributable actor (e.g. a reconciliation-tick
+    -- expiration, which is a scheduled system process, not a principal
+    -- acting through an authenticated request).
+    triggered_by_principal_id  UUID REFERENCES mc_principal(id),
     detail           JSONB,
     created_at        TIMESTAMPTZ NOT NULL
 );
 
+-- Idempotency identity is scoped to (idempotency_key, principal_id,
+-- endpoint), never the key alone: a bare-key primary key would let two
+-- different principals' independently-chosen identical keys collide, and
+-- the normative replay rule ("same key + same payload replays the original
+-- result") would then replay the *first* principal's response for the
+-- *second* principal's request — or, if the first principal's key happens
+-- to match a value the second principal predictably reuses, let one
+-- principal's operation be silently served in place of another's. Every
+-- comparison (replay vs. reuse-with-different-payload) is scoped to this
+-- same triple.
 CREATE TABLE mc_approval_operation (
-    idempotency_key  VARCHAR(128) PRIMARY KEY,
+    id                UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    idempotency_key   VARCHAR(128) NOT NULL,
     principal_id      UUID NOT NULL REFERENCES mc_principal(id),
     endpoint            VARCHAR(128) NOT NULL,
     payload_hash          VARCHAR(128) NOT NULL,
     response_snapshot       JSONB NOT NULL,
-    created_at                TIMESTAMPTZ NOT NULL
+    created_at                TIMESTAMPTZ NOT NULL,
+    UNIQUE (idempotency_key, principal_id, endpoint)
 );
 
 CREATE INDEX ix_mc_approval_request_mission
@@ -227,13 +319,15 @@ CREATE INDEX ix_mc_approval_event_request
 
 ## API design
 
-### Read (Checkpoint B/C-adjacent, no ADR-23 gating — GET only)
+### Read (Checkpoint D, not ADR-23-gated — GET only)
 
 `GET /api/v1/mission/approvals`, `GET /api/v1/mission/approvals/{request_id}` — follow the existing `require_user_auth` + flat-response-model + `limit` pagination pattern from `app/api/mission.py`. Response includes request status, Mission reference, action key, policy key/version, decision rule, quorum satisfied + current counts, effective decisions, lifecycle history, expiration, and current Mission effect. The frontend never reconstructs supersession chains or quorum state itself — the backend evaluator is the sole source of truth.
 
 ### Mutation (Checkpoint D — requires ADR-23 revision 16 Accepted)
 
-`POST /api/v1/mission/approvals` (client provides `policy_key`, Mission reference, `scope_type`, `action_key`, `reason`; backend resolves `policy_key` to its exact active version — the client never chooses a policy version), `POST /api/v1/mission/approvals/{request_id}/decisions` (client sends only `{decision, reason}`; backend returns the persisted decision plus the latest evaluation), `POST /api/v1/mission/approvals/{request_id}/supersede` (`{supersedes_decision_id, decision, reason}`, validated per the Decision Immutability rules below).
+`POST /api/v1/mission/approvals` — client provides `policy_key`, Mission reference, `scope_type`, `action_key`, `reason`, and an optional `supersedes_request_id`. The backend resolves `policy_key` to whichever `mc_approval_policy` row currently has `is_active = true` (the deterministic active-version rule defined in Data model impact above) and pins that row's `id`, not the key — the client never chooses a policy version directly. When `supersedes_request_id` is supplied, the backend validates it names a request sharing the same Mission reference and `action_key` and currently in a terminal state (`approved`/`rejected`/`expired`/`superseded`; anything else is `409 invalid_supersede`) before creating the new request as its successor — this is how a human operator starts a new review cycle after a rejected/expired request. System-created requests (from Automatic request triggers, below) resolve their predecessor the same way, automatically: when a new head/revision is observed for a `mission_ref`/`action_key` pair that already has a terminal request, the trigger sets `supersedes_request_id` to that request's id before creating the new one — never left to the client to specify for the automated path.
+
+`POST /api/v1/mission/approvals/{request_id}/decisions` (client sends only `{decision, reason}`; backend returns the persisted decision plus the latest evaluation), `POST /api/v1/mission/approvals/{request_id}/supersede` (`{supersedes_decision_id, decision, reason}`, validated per the Decision Immutability rules below).
 
 ### Closed error taxonomy
 
@@ -243,10 +337,10 @@ CREATE INDEX ix_mc_approval_event_request
 
 ## Approval semantics (normative, matches the approved direction verbatim)
 
-- **Effective decision:** one principal contributes at most one effective vote per request; a second `POST /decisions` from the same effective decision returns `409 approval_decision_exists` — changing it requires the explicit supersede operation. One principal with multiple roles never satisfies multiple quorum slots.
+- **Effective decision:** one principal contributes at most one effective vote per request; a second `POST /decisions` from the same effective decision returns `409 approval_decision_exists` — changing it requires the explicit supersede operation. A principal may hold multiple roles (`mc_principal_role`, one row per role); this still contributes exactly one effective vote per request — a principal's full role set is checked for eligibility/veto authority, but does not multiply their vote into multiple quorum slots.
 - **Majority:** quorum first, then `approve > reject` among effective decisions; incomplete quorum stays `pending` even if the received votes already favor one side.
 - **Unanimous:** quorum fully satisfied and no effective rejection exists.
-- **Veto:** only roles the policy explicitly names as veto-authorized can trigger an immediate rejection on a `reject` decision; no other rejection is treated as a veto.
+- **Veto — complete predicate:** (1) if any effective decision is a `reject` from a principal holding a policy-designated veto-authorized role, the request is immediately `rejected` — this check applies regardless of quorum state, including before quorum would otherwise be satisfied; (2) absent any such veto-authorized rejection, the request becomes `approved` once quorum is satisfied and at least one effective decision is `approve`; (3) a `reject` from a principal *not* holding a veto-authorized role is recorded as an effective decision (visible in history, still counts toward quorum's participant count) but neither triggers immediate rejection nor blocks approval on its own — only case (1) rejects, and only case (2) approves. A request satisfying quorum with only non-veto rejections and zero approvals remains `pending` (approval requires an affirmative `approve`, not merely the absence of a veto).
 - **Decision immutability:** a decision's `decision` value is never updated in place; a correction creates a new decision with `supersedes_decision_id` pointing at the prior one. A principal may only supersede its own effective decision (no administrative override in Slice 5A).
 - **Request vs. decision supersession:** decision supersession corrects an active request's effective vote; request supersession represents a new review cycle (`supersedes_request_id`) — a rejected request is never reopened, only superseded by a new one.
 - **Terminal states:** `approved`, `rejected`, `expired`, `superseded`. Any decision attempt after terminal resolution returns `409 approval_request_terminal`.
@@ -268,7 +362,12 @@ CREATE INDEX ix_mc_approval_event_request
 | Partial write on event-persistence failure | Decision + evaluation + status update + events are one atomic transaction; any failure rolls back the whole write. |
 | Idempotency-key replay with different payload | `mc_approval_operation.payload_hash` comparison; mismatch returns `409 idempotency_key_reused`. |
 | Unbounded expire→recreate loop | `max_auto_retries` bound enforced by the reconciliation job. |
-| Duplicate system-created requests from repeated polling | Deterministic trigger key makes creation idempotent; no-op on repeated observation of the same revision. |
+| Duplicate system-created requests from repeated polling or multiple replicas | `trigger_key` carries a database `UNIQUE` constraint (`ux_mc_approval_request_trigger_key`); creation is an upsert (`ON CONFLICT DO NOTHING`), not a racy SELECT-then-INSERT. Each bounded auto-retry gets its own distinct trigger key. |
+| Idempotency key collision across principals | `mc_approval_operation` identity and replay/reuse comparison are scoped to `(idempotency_key, principal_id, endpoint)`, never the key alone. |
+| Reconciliation silently not running (adapter-disabled deployments) | Expiration reconciliation runs on its own scheduled task, started independently of `_start_github_adapter`'s `GITHUB_PAT`-gated startup. |
+| Mutation-guard parameterized-route bypass or permanent 405 | D8a's two `{request_id}` routes require route-template-aware matching in `mutation_guard.py`, not literal-string comparison; tested explicitly (Checkpoint D) against both a blocked-when-disabled case and an allowed-when-enabled case with a real UUID path. |
+| Approval history reinterpreted after a principal's role/trust changes | `mc_approval_decision` snapshots `role_slugs_at_decision`/`trust_level_at_decision` at submission time; historical evaluation always replays against the snapshot, never the principal's current attributes. |
+| Unauthenticatable approver role (`ai`) making quorum permanently unsatisfiable | Policy schema validation (Checkpoint B) rejects any policy naming `ai` as an eligible approver in Slice 5A, since no authenticated resolution path for `ai` principals exists yet. |
 
 No new external network calls. No secrets flow into any new table or response.
 
@@ -276,7 +375,7 @@ No new external network calls. No secrets flow into any new table or response.
 
 ## Migration strategy
 
-Single Alembic migration, additive only (six new tables, indexes as listed above). Safe to apply to a live Slice 4 deployment with zero downtime. Rollback drops only the six new tables and their indexes without affecting existing data.
+Single Alembic migration, additive only (seven new tables, indexes as listed above). Safe to apply to a live Slice 4 deployment with zero downtime. Rollback drops only the seven new tables and their indexes without affecting existing data.
 
 ---
 
