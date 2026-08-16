@@ -16,7 +16,12 @@ from app.core.mutation_guard import (
     MutationHardDisableMiddleware,
 )
 from app.mission.github_client import GitHubReadClient
-from app.mission.types import MANUAL_REFRESH_ALLOWLIST_ENTRY, QuarantineReason, SourceType
+from app.mission.types import (
+    CREATE_APPROVAL_ALLOWLIST_ENTRY,
+    MANUAL_REFRESH_ALLOWLIST_ENTRY,
+    QuarantineReason,
+    SourceType,
+)
 from app.models.mc_projection import McProjectionRecord
 
 
@@ -37,9 +42,17 @@ async def test_github_client_forbids_non_allowlisted_rest_path() -> None:
     await client.aclose()
 
 
-def test_mutation_allowlist_contains_exactly_manual_refresh() -> None:
-    assert MUTATION_ALLOWLIST == frozenset({MANUAL_REFRESH_ALLOWLIST_ENTRY})
+def test_mutation_allowlist_contains_exactly_manual_refresh_and_create_approval() -> None:
+    # ADR-23 D8a (Slice 5A Checkpoint D) added exactly one more literal entry
+    # (approval creation has no path parameter). The two parameterized D8a
+    # decision/supersede routes are matched separately via a strict
+    # UUID-segment pattern, not a literal entry -- see
+    # tests/mission/test_mutation_guard_approvals.py.
+    assert MUTATION_ALLOWLIST == frozenset(
+        {MANUAL_REFRESH_ALLOWLIST_ENTRY, CREATE_APPROVAL_ALLOWLIST_ENTRY}
+    )
     assert MANUAL_REFRESH_ALLOWLIST_ENTRY == ("POST", "/api/v1/mission/refresh")
+    assert CREATE_APPROVAL_ALLOWLIST_ENTRY == ("POST", "/api/v1/mission/approvals")
 
 
 def test_middleware_allows_only_manual_refresh() -> None:
