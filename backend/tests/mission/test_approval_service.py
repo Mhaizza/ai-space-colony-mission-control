@@ -998,3 +998,145 @@ class TestConcurrencySerialization:
                 idempotency_key="decision-loser",
             )
         assert exc_info.value.code == "request_not_open"
+
+
+class TestSystemCreationCorePrincipalTypeGuard:
+    """Checkpoint E, direct-core test (not via resolve_system_principal):
+    _create_system_approval_request_in_session must reject a non-"system"
+    ResolvedPrincipal before any mutation, independent of and in addition
+    to the policy-level allowed_approver_principal_types check -- a future
+    direct internal caller passing a human-typed principal must never
+    reach a write, even against an otherwise fully system-enabled policy."""
+
+    @pytest.mark.asyncio
+    async def test_human_principal_rejected_before_any_mutation(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        from uuid import uuid4 as _uuid4
+
+        from sqlmodel import select
+
+        from app.mission.approval_policy import ApprovalPolicyDefinition
+        from app.mission.approval_service import _create_system_approval_request_in_session
+        from app.mission.principal_resolver import ResolvedPrincipal
+        from app.models.mc_approval import McApprovalEvent, McApprovalRequest
+
+        system_enabled_policy = {
+            "decision_rule": "majority",
+            "quorum": {"slots": [{"slot": "a", "eligible_roles": ["technical-director"]}]},
+            "allowed_approver_principal_types": ["human", "system"],
+            "allowed_approver_roles": ["technical-director"],
+            "rejection_behavior": "leave_mission_unchanged",
+            "expiration": {"behavior": "expire"},
+        }
+        policy = await _seed_policy(maker, definition=system_enabled_policy)
+        definition = ApprovalPolicyDefinition.model_validate(system_enabled_policy)
+
+        human_principal = ResolvedPrincipal(
+            id=_uuid4(),
+            principal_type="human",  # not "system"
+            display_name="Not The System",
+            trust_level="standard",
+            enabled=True,
+            role_slugs=frozenset(),
+        )
+
+        async with maker() as session:
+            with pytest.raises(ApprovalServiceError) as exc_info:
+                await _create_system_approval_request_in_session(
+                    session,
+                    principal=human_principal,
+                    policy=policy,
+                    definition=definition,
+                    scope_type="action",
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=1,
+                    action_key="implementation_review",
+                    expires_at=None,
+                    trigger_key="mission:owner/repo#1|action:implementation_review|head:"
+                    + "a" * 40,
+                    supersedes_request_id=None,
+                    predecessor_to_supersede=None,
+                    auto_retry_count=0,
+                )
+            assert exc_info.value.code == "principal_not_authorized"
+
+            # No row and no event were ever created.
+            requests = (await session.exec(select(McApprovalRequest))).all()
+            events = (await session.exec(select(McApprovalEvent))).all()
+        assert requests == []
+        assert events == []
+
+    @pytest.mark.asyncio
+    async def test_human_principal_rejected_even_with_predecessor_to_supersede(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        """The predecessor-supersede mutation must not happen either --
+        checked before any write, including the predecessor transition."""
+        from uuid import uuid4 as _uuid4
+
+        from app.mission.approval_policy import ApprovalPolicyDefinition
+        from app.mission.approval_service import _create_system_approval_request_in_session
+        from app.mission.principal_resolver import ResolvedPrincipal
+        from app.models.mc_approval import McApprovalRequest
+
+        system_enabled_policy = {
+            "decision_rule": "majority",
+            "quorum": {"slots": [{"slot": "a", "eligible_roles": ["technical-director"]}]},
+            "allowed_approver_principal_types": ["human", "system"],
+            "allowed_approver_roles": ["technical-director"],
+            "rejection_behavior": "leave_mission_unchanged",
+            "expiration": {"behavior": "expire"},
+        }
+        policy = await _seed_policy(maker, definition=system_enabled_policy)
+        definition = ApprovalPolicyDefinition.model_validate(system_enabled_policy)
+        creator = await _seed_principal(
+            maker, external_subject="creator", roles=["technical-director"]
+        )
+        predecessor = await create_approval_request(
+            _auth("creator"),
+            policy_key="implementation_review",
+            scope_type="action",
+            mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+            mission_card_kind="pull_request",
+            mission_card_number=2,
+            action_key="implementation_review",
+            expires_at=None,
+            idempotency_key="pred-key",
+        )
+        del creator
+
+        human_principal = ResolvedPrincipal(
+            id=_uuid4(),
+            principal_type="human",
+            display_name="Not The System",
+            trust_level="standard",
+            enabled=True,
+            role_slugs=frozenset(),
+        )
+
+        async with maker() as session:
+            predecessor_row = await session.get(McApprovalRequest, predecessor.request_id)
+            assert predecessor_row is not None
+            with pytest.raises(ApprovalServiceError) as exc_info:
+                await _create_system_approval_request_in_session(
+                    session,
+                    principal=human_principal,
+                    policy=policy,
+                    definition=definition,
+                    scope_type="action",
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=2,
+                    action_key="implementation_review",
+                    expires_at=None,
+                    trigger_key="mission:owner/repo#2|action:implementation_review|head:"
+                    + "b" * 40,
+                    supersedes_request_id=predecessor_row.id,
+                    predecessor_to_supersede=predecessor_row,
+                    auto_retry_count=0,
+                )
+            assert exc_info.value.code == "principal_not_authorized"
+            assert predecessor_row.status == "pending"  # untouched
+            assert predecessor_row.resolved_at is None

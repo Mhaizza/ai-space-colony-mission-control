@@ -128,6 +128,23 @@ class ApprovalPolicyDefinition(BaseModel):
         return self
 
     @model_validator(mode="after")
+    def _recreate_requires_system_approver(self) -> ApprovalPolicyDefinition:
+        # Bounded auto-retry (expire -> recreate) is performed entirely by
+        # trusted server automation (Checkpoint E's reconciliation tick),
+        # which always creates the successor as a system-typed principal --
+        # never a human, never client-supplied. A policy that hasn't opted
+        # into "system" as an allowed approver/creator type can therefore
+        # never legally receive a recreate successor, so recreate is
+        # unrepresentable without it.
+        if (
+            self.expiration.behavior == "recreate"
+            and "system" not in self.allowed_approver_principal_types
+        ):
+            msg = "expiration.behavior='recreate' requires 'system' in allowed_approver_principal_types"
+            raise ValueError(msg)
+        return self
+
+    @model_validator(mode="after")
     def _quorum_and_veto_roles_subset_of_allowed_approvers(self) -> ApprovalPolicyDefinition:
         # A quorum slot or a veto-authorized role that isn't itself an
         # allowed approver role would let a policy require or empower a

@@ -72,6 +72,7 @@ from app.core.time import utcnow
 from app.db.session import async_session_maker
 from app.mission.approval_evaluator import EffectiveDecision, evaluate_approval
 from app.mission.approval_policy import ApprovalPolicyDefinition
+from app.mission.approval_system_principal import resolve_system_principal
 from app.mission.principal_resolver import ResolvedPrincipal, resolve_principal
 from app.models.mc_approval import (
     McApprovalDecision,
@@ -142,6 +143,25 @@ class DecisionResult:
     quorum_satisfied: bool
     mission_effect: str | None
     created_at: datetime
+
+
+def _to_request_result(request: McApprovalRequest, policy: McApprovalPolicy) -> RequestResult:
+    """Build a `RequestResult` from a persisted request + its (pinned) policy row.
+
+    Shared by the human-manual path (`create_approval_request`) and the
+    system-trigger path (`create_system_approval_request` /
+    `_create_system_approval_request_in_session`) so the two never drift on
+    what fields a "created request" response reports.
+    """
+    return RequestResult(
+        request_id=request.id,
+        policy_key=policy.policy_key,
+        policy_version=policy.version,
+        status=request.status,
+        created_by_principal_id=request.created_by_principal_id,
+        created_at=request.created_at,
+        expires_at=request.expires_at,
+    )
 
 
 def _request_result_to_snapshot(result: RequestResult) -> dict[str, Any]:
@@ -501,15 +521,7 @@ async def create_approval_request(
             )
         )
 
-        result = RequestResult(
-            request_id=request.id,
-            policy_key=policy.policy_key,
-            policy_version=policy.version,
-            status=request.status,
-            created_by_principal_id=principal.id,
-            created_at=request.created_at,
-            expires_at=request.expires_at,
-        )
+        result = _to_request_result(request, policy)
         await _finalize_operation(
             session,
             idempotency_key=idempotency_key,
@@ -691,3 +703,213 @@ async def supersede_decision(
             response_snapshot=_decision_result_to_snapshot(result),
         )
         return result
+
+
+# ---------------------------------------------------------------------------
+# Checkpoint E: trusted system-trigger creation path.
+#
+# Distinct from the idempotency mechanism above in every respect: there is
+# no HTTP caller, no Idempotency-Key, and no `mc_approval_operation` row
+# involved here. Duplicate/replay suppression is instead the
+# `trigger_key`/`recreate:` deterministic-key + database-unique-index
+# mechanism (see `_create_system_approval_request_in_session`'s
+# IntegrityError fallback below) -- a wholly separate idempotency
+# mechanism, per design, never touching Checkpoint C/D's.
+# ---------------------------------------------------------------------------
+
+
+def _next_recreate_trigger_key(predecessor: McApprovalRequest) -> str:
+    """Deterministic trigger_key for a bounded-recreate successor.
+
+    Never stacks `|retry:` suffixes. `n` here must always be identical to
+    the `auto_retry_count` the caller separately assigns to the successor
+    row (both are `predecessor.auto_retry_count + 1`, read once from the
+    same locked row within the same critical section -- see
+    `approval_reconciliation.py`'s recreate branch and the cross-check test
+    that proves the two never drift apart).
+    """
+    n = predecessor.auto_retry_count + 1
+    if predecessor.trigger_key is None:
+        # Human-created original: this predecessor itself is the chain's root.
+        return f"recreate:{predecessor.id}|retry:{n}"
+    if predecessor.trigger_key.startswith("recreate:"):
+        # A prior retry of a human-origin chain: carry the same root
+        # forward -- never re-derive it from this retry's own id.
+        root = predecessor.trigger_key.removeprefix("recreate:").split("|", 1)[0]
+        return f"recreate:{root}|retry:{n}"
+    # System/head-origin request (trigger_key starts with "mission:"):
+    # strip any existing "|retry:<k>" suffix to recover the base
+    # mission-key, then append exactly one fresh suffix.
+    base = predecessor.trigger_key.split("|retry:", 1)[0]
+    return f"{base}|retry:{n}"
+
+
+async def _create_system_approval_request_in_session(
+    session: AsyncSession,
+    *,
+    principal: ResolvedPrincipal,
+    policy: McApprovalPolicy,
+    definition: ApprovalPolicyDefinition,
+    scope_type: str,
+    mission_source_repo: str,
+    mission_card_kind: str,
+    mission_card_number: int,
+    action_key: str | None,
+    expires_at: datetime | None,
+    trigger_key: str,
+    supersedes_request_id: UUID | None,
+    predecessor_to_supersede: McApprovalRequest | None,
+    auto_retry_count: int,
+    created_at: datetime | None = None,
+) -> RequestResult:
+    """Pure in-session core of system-trigger request creation.
+
+    Never opens or commits a transaction -- the caller owns that. This is
+    what makes it safe to call from inside reconciliation's per-row
+    transaction (recreate: predecessor-expire + successor-insert must be
+    atomic) or a trigger's own transaction (stale-head: predecessor-
+    supersede + successor-insert must be atomic), rather than only from a
+    fresh session.
+
+    `created_at` defaults to a fresh `utcnow()` reading when omitted (the
+    ordinary trigger-observation case). Reconciliation's recreate branch
+    passes its own already-computed `now` explicitly instead, so the
+    successor's `expires_at - created_at` exactly equals the preserved TTL
+    window rather than drifting by the microseconds between two separate
+    `utcnow()` calls.
+    """
+    if principal.principal_type != "system":
+        # Enforced here, independent of and in addition to the
+        # policy-authorization check below -- any future direct internal
+        # caller of this function must be rejected for a non-system
+        # principal even if the target policy happens to permit "system"
+        # creators, since this function unconditionally persists
+        # creation_source="system". Checked first, before any mutation.
+        raise ApprovalServiceError(
+            "principal_not_authorized",
+            f"principal {principal.id} has principal_type={principal.principal_type!r}; "
+            "system-created requests require a system principal",
+        )
+    if "system" not in definition.allowed_approver_principal_types:
+        raise ApprovalServiceError(
+            "principal_not_authorized",
+            f"policy {policy.policy_key!r} does not permit system-created requests",
+        )
+
+    if predecessor_to_supersede is not None:
+        # Caller has already SELECT ... FOR UPDATE'd this row and rechecked
+        # it is still "pending" -- this function trusts that lock; it does
+        # not re-acquire or re-check it itself.
+        predecessor_to_supersede.status = "superseded"
+        predecessor_to_supersede.resolved_at = utcnow()
+        session.add(predecessor_to_supersede)
+        session.add(
+            McApprovalEvent(
+                request_id=predecessor_to_supersede.id,
+                event_type="request_superseded",
+                triggered_by_principal_id=principal.id,
+                detail={"reason": "newer_trigger_observed", "trigger_key": trigger_key},
+                created_at=utcnow(),
+            )
+        )
+        await session.flush()
+
+    request_created_at = created_at if created_at is not None else utcnow()
+    try:
+        async with session.begin_nested():
+            request = McApprovalRequest(
+                policy_id=policy.id,
+                scope_type=scope_type,
+                mission_source_repo=mission_source_repo,
+                mission_card_kind=mission_card_kind,
+                mission_card_number=mission_card_number,
+                action_key=action_key,
+                created_by_principal_id=principal.id,
+                creation_source="system",
+                status="pending",
+                created_at=request_created_at,
+                expires_at=expires_at,
+                supersedes_request_id=supersedes_request_id,
+                trigger_key=trigger_key,
+                auto_retry_count=auto_retry_count,
+            )
+            session.add(request)
+            await session.flush()
+        session.add(
+            McApprovalEvent(
+                request_id=request.id,
+                event_type="request_created",
+                triggered_by_principal_id=principal.id,
+                detail={"trigger_key": trigger_key},
+                created_at=utcnow(),
+            )
+        )
+        await session.flush()
+        return _to_request_result(request, policy)
+    except IntegrityError:
+        # trigger_key already exists -- either a genuine prior request for
+        # this exact logical event, or a concurrent racer that just won.
+        existing = (
+            await session.exec(
+                select(McApprovalRequest).where(McApprovalRequest.trigger_key == trigger_key)
+            )
+        ).first()
+        if (
+            existing is None
+        ):  # pragma: no cover - lost race with a delete, not reachable in practice
+            raise
+        return _to_request_result(existing, policy)
+
+
+async def create_system_approval_request(
+    *,
+    policy_key: str,
+    scope_type: str,
+    mission_source_repo: str,
+    mission_card_kind: str,
+    mission_card_number: int,
+    action_key: str | None,
+    expires_at: datetime | None,
+    trigger_key: str,
+    supersedes_request_id: UUID | None = None,
+    created_at: datetime | None = None,
+) -> RequestResult:
+    """Fresh-session public wrapper for system-trigger request creation.
+
+    Used only by callers with no already-open transaction of their own --
+    first-observation and terminal-predecessor trigger cases, which need no
+    cross-row atomicity beyond the single insert itself. Reconciliation's
+    recreate branch and a trigger's stale-head-supersession branch call
+    `_create_system_approval_request_in_session` directly inside their own
+    already-open transaction instead (see `approval_reconciliation.py` /
+    `approval_triggers.py`) -- never this wrapper, which would open a
+    second, separate transaction and break the atomicity those two cases
+    require.
+
+    Always creates with `auto_retry_count=0`: a fresh trigger observation
+    is never itself a retry. `created_at` defaults to a fresh `utcnow()`
+    reading when omitted; pass it explicitly (paired with an `expires_at`
+    computed from that same value) so `expires_at - created_at` equals the
+    caller's intended TTL exactly, rather than drifting by the microseconds
+    between two separate `utcnow()` calls.
+    """
+    async with async_session_maker() as session, session.begin():
+        principal = await resolve_system_principal(session)
+        policy, definition = await _load_active_policy(session, policy_key)
+        return await _create_system_approval_request_in_session(
+            session,
+            principal=principal,
+            policy=policy,
+            definition=definition,
+            scope_type=scope_type,
+            mission_source_repo=mission_source_repo,
+            mission_card_kind=mission_card_kind,
+            mission_card_number=mission_card_number,
+            action_key=action_key,
+            expires_at=expires_at,
+            trigger_key=trigger_key,
+            supersedes_request_id=supersedes_request_id,
+            predecessor_to_supersede=None,
+            auto_retry_count=0,
+            created_at=created_at,
+        )

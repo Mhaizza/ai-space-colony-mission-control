@@ -50,8 +50,14 @@ class TestValidPolicies:
         )
 
     def test_recreate_expiration_with_max_retries_parses(self) -> None:
+        # "system" must be present in allowed_approver_principal_types for a
+        # "recreate" policy to parse at all -- see
+        # TestRecreateRequiresSystemApprover below (Checkpoint E).
         ApprovalPolicyDefinition(
-            **_base_kwargs(expiration=ExpirationConfig(behavior="recreate", max_auto_retries=3))
+            **_base_kwargs(
+                allowed_approver_principal_types=["human", "system"],
+                expiration=ExpirationConfig(behavior="recreate", max_auto_retries=3),
+            )
         )
 
 
@@ -175,3 +181,55 @@ class TestQuorumAndVetoRolesSubsetOfAllowedApprovers:
                     veto=VetoConfig(veto_authorized_roles=["qa-reviewer"]),
                 )
             )
+
+
+class TestRecreateRequiresSystemApprover:
+    """Checkpoint E: bounded auto-retry recreate is always performed by a
+    system-typed principal (reconciliation's trusted server automation),
+    never a human -- so a policy naming "recreate" must permit "system" as
+    an allowed approver/creator type, or the resulting successor could
+    never legally be created under it."""
+
+    def test_recreate_without_system_approver_type_rejected(self) -> None:
+        with pytest.raises(
+            ValidationError, match="requires 'system' in allowed_approver_principal_types"
+        ):
+            ApprovalPolicyDefinition(
+                **_base_kwargs(
+                    allowed_approver_principal_types=["human"],
+                    expiration=ExpirationConfig(behavior="recreate", max_auto_retries=3),
+                )
+            )
+
+    def test_recreate_with_system_approver_type_parses(self) -> None:
+        ApprovalPolicyDefinition(
+            **_base_kwargs(
+                allowed_approver_principal_types=["human", "system"],
+                expiration=ExpirationConfig(behavior="recreate", max_auto_retries=3),
+            )
+        )
+
+    def test_recreate_with_system_only_approver_type_parses(self) -> None:
+        ApprovalPolicyDefinition(
+            **_base_kwargs(
+                allowed_approver_principal_types=["system"],
+                expiration=ExpirationConfig(behavior="recreate", max_auto_retries=3),
+            )
+        )
+
+    def test_expire_behavior_does_not_require_system_approver(self) -> None:
+        # The new rule is scoped to behavior="recreate" only -- plain expire
+        # and block_mission never require "system", human-only policies
+        # remain fully valid for those.
+        ApprovalPolicyDefinition(
+            **_base_kwargs(
+                allowed_approver_principal_types=["human"],
+                expiration=ExpirationConfig(behavior="expire"),
+            )
+        )
+        ApprovalPolicyDefinition(
+            **_base_kwargs(
+                allowed_approver_principal_types=["human"],
+                expiration=ExpirationConfig(behavior="block_mission"),
+            )
+        )
