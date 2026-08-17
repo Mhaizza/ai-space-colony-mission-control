@@ -74,8 +74,15 @@ def _build_mission_trigger_key(
     return key
 
 
-def _default_expires_at() -> datetime:
-    return utcnow() + timedelta(seconds=settings.mc_approval_default_expiration_seconds)
+def _new_request_timestamps() -> tuple[datetime, datetime]:
+    """One authoritative `utcnow()` reading for a new trigger-created
+    request's `(created_at, expires_at)` pair, so `expires_at - created_at`
+    equals exactly `mc_approval_default_expiration_seconds` -- never two
+    separate `utcnow()` calls, which would drift by the microseconds
+    between them."""
+    created_at = utcnow()
+    expires_at = created_at + timedelta(seconds=settings.mc_approval_default_expiration_seconds)
+    return created_at, expires_at
 
 
 async def evaluate_triggers(
@@ -134,6 +141,7 @@ async def _create_trigger_request(
     trigger_key: str,
     supersedes_request_id: UUID | None,
 ) -> None:
+    created_at, expires_at = _new_request_timestamps()
     await create_system_approval_request(
         policy_key=TRIGGER_POLICY_KEY,
         scope_type=TRIGGER_SCOPE_TYPE,
@@ -141,9 +149,10 @@ async def _create_trigger_request(
         mission_card_kind=TRIGGER_MISSION_CARD_KIND,
         mission_card_number=pr_number,
         action_key=TRIGGER_ACTION_KEY,
-        expires_at=_default_expires_at(),
+        expires_at=expires_at,
         trigger_key=trigger_key,
         supersedes_request_id=supersedes_request_id,
+        created_at=created_at,
     )
 
 
@@ -164,6 +173,16 @@ async def _evaluate_one_pr(
         head_sha=head_sha,
     )
 
+    # Predecessor/history lookup is NOT restricted to trigger_key IS NOT
+    # NULL: the most recent request for this exact
+    # (mission_source_repo, mission_card_number, action_key) triple is the
+    # predecessor for the five-case trigger model regardless of whether it
+    # was Human- or system-created. trigger_key is only the automatic-event
+    # dedup key (used below via the `latest.trigger_key == new_trigger_key`
+    # comparison, which a NULL trigger_key -- a Human-created predecessor --
+    # can never equal, so it always falls through to the new-head branches
+    # correctly); it must never define which domain requests count as
+    # predecessor history.
     latest = (
         await session.exec(
             select(McApprovalRequest)
@@ -171,7 +190,6 @@ async def _evaluate_one_pr(
                 col(McApprovalRequest.mission_source_repo) == mission_source_repo,
                 col(McApprovalRequest.mission_card_number) == pr_number,
                 col(McApprovalRequest.action_key) == TRIGGER_ACTION_KEY,
-                col(McApprovalRequest.trigger_key).is_not(None),
             )
             .order_by(col(McApprovalRequest.created_at).desc())
             .limit(1)
@@ -264,6 +282,7 @@ async def _handle_new_head_pending_predecessor(
         if still_pending:
             principal = await resolve_system_principal(session)
             policy, definition = await _load_active_policy(session, TRIGGER_POLICY_KEY)
+            created_at, expires_at = _new_request_timestamps()
             await _create_system_approval_request_in_session(
                 session,
                 principal=principal,
@@ -274,11 +293,12 @@ async def _handle_new_head_pending_predecessor(
                 mission_card_kind=TRIGGER_MISSION_CARD_KIND,
                 mission_card_number=pr_number,
                 action_key=TRIGGER_ACTION_KEY,
-                expires_at=_default_expires_at(),
+                expires_at=expires_at,
                 trigger_key=new_trigger_key,
                 supersedes_request_id=predecessor.id,
                 predecessor_to_supersede=predecessor,
                 auto_retry_count=0,
+                created_at=created_at,
             )
 
     if still_pending:

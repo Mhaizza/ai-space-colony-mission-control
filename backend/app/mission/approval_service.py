@@ -872,6 +872,7 @@ async def create_system_approval_request(
     expires_at: datetime | None,
     trigger_key: str,
     supersedes_request_id: UUID | None = None,
+    created_at: datetime | None = None,
 ) -> RequestResult:
     """Fresh-session public wrapper for system-trigger request creation.
 
@@ -886,7 +887,11 @@ async def create_system_approval_request(
     require.
 
     Always creates with `auto_retry_count=0`: a fresh trigger observation
-    is never itself a retry.
+    is never itself a retry. `created_at` defaults to a fresh `utcnow()`
+    reading when omitted; pass it explicitly (paired with an `expires_at`
+    computed from that same value) so `expires_at - created_at` equals the
+    caller's intended TTL exactly, rather than drifting by the microseconds
+    between two separate `utcnow()` calls.
     """
     async with async_session_maker() as session, session.begin():
         principal = await resolve_system_principal(session)
@@ -906,4 +911,5 @@ async def create_system_approval_request(
             supersedes_request_id=supersedes_request_id,
             predecessor_to_supersede=None,
             auto_retry_count=0,
+            created_at=created_at,
         )

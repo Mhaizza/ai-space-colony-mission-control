@@ -25,7 +25,9 @@ import app.mission.approval_service as approval_service
 from app.core.time import utcnow
 from app.mission.approval_triggers import (
     TRIGGER_ACTION_KEY,
+    TRIGGER_MISSION_CARD_KIND,
     TRIGGER_POLICY_KEY,
+    TRIGGER_SCOPE_TYPE,
     _build_mission_trigger_key,
     evaluate_triggers,
 )
@@ -156,6 +158,61 @@ async def _requests_for(
                 )
             )
         )
+
+
+async def _seed_human_request(
+    maker: async_sessionmaker[AsyncSession],
+    policy: McApprovalPolicy,
+    *,
+    pr_number: int,
+    status: str = "pending",
+) -> McApprovalRequest:
+    """A Human-created implementation_review request -- creation_source
+    "human", trigger_key NULL -- the exact shape a real
+    create_approval_request() call would leave behind. Constructed directly
+    against the model (mirroring test_approval_reconciliation.py's
+    _seed_request helper) rather than via the full AuthContext/principal-
+    resolution plumbing, since this test module is only exercising
+    evaluate_triggers' predecessor lookup, not the human creation path
+    itself (already covered by test_approval_service.py)."""
+    from app.models.mc_approval import McPrincipal
+
+    async with maker() as session:
+        creator = McPrincipal(
+            principal_type="human",
+            display_name=f"human-creator-{pr_number}",
+            trust_level="standard",
+            enabled=True,
+            external_provider="local",
+            external_subject=f"human-creator-{pr_number}",
+        )
+        session.add(creator)
+        await session.commit()
+        await session.refresh(creator)
+
+        request = McApprovalRequest(
+            policy_id=policy.id,
+            scope_type=TRIGGER_SCOPE_TYPE,
+            mission_source_repo=MISSION_REPO,
+            mission_card_kind=TRIGGER_MISSION_CARD_KIND,
+            mission_card_number=pr_number,
+            action_key=TRIGGER_ACTION_KEY,
+            created_by_principal_id=creator.id,
+            creation_source="human",
+            status=status,
+            created_at=utcnow(),
+            expires_at=None,
+            trigger_key=None,
+        )
+        session.add(request)
+        await session.commit()
+        await session.refresh(request)
+        if status != "pending":
+            request.resolved_at = utcnow()
+            session.add(request)
+            await session.commit()
+            await session.refresh(request)
+        return request
 
 
 class TestTriggerKeyConstruction:
@@ -390,3 +447,131 @@ class TestNoGitHubMutationSurface:
         assert not any(
             "github" in name.lower() and "client" in name.lower() for name in source_names
         )
+
+
+class TestHumanCreatedPredecessorHistory:
+    """Re-review blocker: the predecessor/history lookup must not exclude
+    Human-created requests just because trigger_key is NULL -- the most
+    recent request for the exact (mission_source_repo, mission_card_number,
+    action_key) triple is the predecessor regardless of creation_source."""
+
+    @pytest.mark.asyncio
+    async def test_human_pending_predecessor_atomically_superseded(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async with _test_env(monkeypatch) as maker:
+            policy = await _seed_policy(maker)
+            human_predecessor = await _seed_human_request(maker, policy, pr_number=20)
+            await _seed_pr_projection(maker, pr_number=20, head_sha="a" * 40)
+
+            async with maker() as session:
+                result = await evaluate_triggers(session, owner=OWNER, repo=REPO)
+
+            assert result.superseded == 1
+            assert result.created == 0
+
+            async with maker() as session:
+                predecessor = await session.get(McApprovalRequest, human_predecessor.id)
+            assert predecessor is not None
+            assert predecessor.status == "superseded"
+            assert predecessor.resolved_at is not None
+
+            requests_after = await _requests_for(maker, pr_number=20)
+            assert len(requests_after) == 2
+            successor = next(r for r in requests_after if r.id != human_predecessor.id)
+            assert successor.status == "pending"
+            assert successor.creation_source == "system"
+            assert successor.supersedes_request_id == human_predecessor.id
+
+            # Exactly one request_superseded event on the Human predecessor.
+            events = await _events_for(maker, human_predecessor.id)
+            assert [e.event_type for e in events] == ["request_superseded"]
+
+            # No two pending review cycles remain for this repo/PR/action.
+            pending = [r for r in requests_after if r.status == "pending"]
+            assert len(pending) == 1
+
+    @pytest.mark.asyncio
+    async def test_human_terminal_predecessor_gets_linked_system_successor(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        async with _test_env(monkeypatch) as maker:
+            policy = await _seed_policy(maker)
+            human_predecessor = await _seed_human_request(
+                maker, policy, pr_number=21, status="rejected"
+            )
+            await _seed_pr_projection(maker, pr_number=21, head_sha="b" * 40)
+
+            async with maker() as session:
+                result = await evaluate_triggers(session, owner=OWNER, repo=REPO)
+
+            assert result.created == 1
+            assert result.superseded == 0
+
+            async with maker() as session:
+                predecessor = await session.get(McApprovalRequest, human_predecessor.id)
+            assert predecessor is not None
+            assert predecessor.status == "rejected"  # unchanged
+
+            requests_after = await _requests_for(maker, pr_number=21)
+            assert len(requests_after) == 2
+            successor = next(r for r in requests_after if r.id != human_predecessor.id)
+            assert successor.status == "pending"
+            assert successor.creation_source == "system"
+            assert successor.supersedes_request_id == human_predecessor.id
+
+            # No two pending review cycles remain for this repo/PR/action.
+            pending = [r for r in requests_after if r.status == "pending"]
+            assert len(pending) == 1
+
+
+class TestTriggerCreatedTTLExactness:
+    """Re-review blocker: expires_at - created_at must equal exactly
+    mc_approval_default_expiration_seconds (86400s), not slightly less due
+    to two separate utcnow() calls."""
+
+    @pytest.mark.asyncio
+    async def test_first_observation_ttl_is_exact(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        from datetime import timedelta
+
+        from app.core.config import settings
+
+        async with _test_env(monkeypatch) as maker:
+            await _seed_policy(maker)
+            await _seed_pr_projection(maker, pr_number=22, head_sha="c" * 40)
+
+            async with maker() as session:
+                await evaluate_triggers(session, owner=OWNER, repo=REPO)
+
+            requests = await _requests_for(maker, pr_number=22)
+            assert len(requests) == 1
+            request = requests[0]
+            assert request.expires_at is not None
+            assert request.expires_at - request.created_at == timedelta(
+                seconds=settings.mc_approval_default_expiration_seconds
+            )
+
+    @pytest.mark.asyncio
+    async def test_new_head_pending_predecessor_successor_ttl_is_exact(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from datetime import timedelta
+
+        from app.core.config import settings
+
+        async with _test_env(monkeypatch) as maker:
+            await _seed_policy(maker)
+            await _seed_pr_projection(maker, pr_number=23, head_sha="d" * 40)
+            async with maker() as session:
+                await evaluate_triggers(session, owner=OWNER, repo=REPO)
+
+            await _seed_pr_projection(maker, pr_number=23, head_sha="e" * 40)
+            async with maker() as session:
+                await evaluate_triggers(session, owner=OWNER, repo=REPO)
+
+            requests = await _requests_for(maker, pr_number=23)
+            successor = max(requests, key=lambda r: r.created_at)
+            assert successor.expires_at is not None
+            assert successor.expires_at - successor.created_at == timedelta(
+                seconds=settings.mc_approval_default_expiration_seconds
+            )
