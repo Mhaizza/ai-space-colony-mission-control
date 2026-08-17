@@ -44,6 +44,9 @@ from app.core.rate_limit import validate_rate_limit_redis
 from app.core.rate_limit_backend import RateLimitBackend
 from app.core.security_headers import SecurityHeadersMiddleware
 from app.db.session import async_session_maker, init_db
+from app.mission.approval_reconciliation import run_reconciliation_tick
+from app.mission.approval_reconciliation_scheduler import ApprovalReconciliationScheduler
+from app.mission.approval_triggers import evaluate_triggers
 from app.mission.github_client import GitHubReadClient
 from app.mission.polling import PollingScheduler
 from app.mission.principal_registry import parse_principal_registry_json
@@ -509,6 +512,19 @@ async def _start_github_adapter(fastapi_app: FastAPI) -> None:
                     await purge_tombstoned(session, settings.mc_retention_tombstone_days)
                 except Exception:  # noqa: BLE001 — GC failure must not fail the poll
                     logger.exception("mission.poller.gc_failed")
+                # Slice 5A Checkpoint E: evaluate automatic approval-request
+                # triggers against the projection state this sync just
+                # committed -- read-only observation only, never a new
+                # GitHub call. Isolated from the sync cycle for the same
+                # reason as the GC step above.
+                try:
+                    await evaluate_triggers(
+                        session,
+                        owner=settings.github_self_owner,
+                        repo=settings.github_self_repo,
+                    )
+                except Exception:  # noqa: BLE001 — trigger failure must not fail the poll
+                    logger.exception("mission.poller.approval_triggers_failed")
 
         poller = PollingScheduler(
             interval_seconds=settings.github_poll_interval_seconds,
@@ -547,10 +563,32 @@ async def lifespan(fastapi_app: FastAPI) -> AsyncIterator[None]:
     else:
         logger.info("app.lifecycle.github_adapter.disabled")
 
+    # Slice 5A Checkpoint E: approval expiration reconciliation runs on its
+    # own scheduled task, unconditionally -- independent of
+    # github_adapter_enabled/GITHUB_PAT. Approval governance has no
+    # dependency on the GitHub adapter being enabled; tying reconciliation
+    # to that conditional startup would silently stop expiring/blocking/
+    # recreating approval requests whenever the adapter is disabled.
+    async def _approval_reconciliation_tick() -> None:
+        async with async_session_maker() as session:
+            await run_reconciliation_tick(session)
+
+    approval_scheduler = ApprovalReconciliationScheduler(
+        interval_seconds=settings.mc_approval_reconciliation_interval_seconds,
+        tick=_approval_reconciliation_tick,
+    )
+    approval_scheduler.start()
+    fastapi_app.state.approval_reconciliation_scheduler = approval_scheduler
+
     logger.info("app.lifecycle.started")
     try:
         yield
     finally:
+        approval_scheduler_obj = getattr(
+            fastapi_app.state, "approval_reconciliation_scheduler", None
+        )
+        if approval_scheduler_obj is not None:
+            await approval_scheduler_obj.stop()
         poller_obj = getattr(fastapi_app.state, "github_poller", None)
         if poller_obj is not None:
             await poller_obj.stop()

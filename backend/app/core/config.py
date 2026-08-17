@@ -66,6 +66,18 @@ class Settings(BaseSettings):
     # Zero or negative disables the purge entirely.
     mc_retention_tombstone_days: int = 30
 
+    # Slice 5A Checkpoint E: approval-domain lifecycle automation. Runs on
+    # its own scheduled task, independent of the GitHub-adapter-gated
+    # poller above (see app/mission/approval_reconciliation_scheduler.py).
+    mc_approval_reconciliation_interval_seconds: int = Field(default=60, ge=15, le=300)
+    mc_approval_reconciliation_batch_size: int = Field(default=200, ge=1, le=1000)
+    # Default review-window duration for a first-observation automatic
+    # trigger request (Human-approved Checkpoint E decision, Option 1).
+    # Recreate successors instead preserve their predecessor's own
+    # original TTL -- this setting applies only to the first request in a
+    # trigger chain.
+    mc_approval_default_expiration_seconds: int = Field(default=86400, ge=1)
+
     # Clerk auth (auth only; roles stored in DB)
     clerk_secret_key: str = ""
     clerk_api_url: str = "https://api.clerk.com"
