@@ -10,6 +10,6 @@ import type { MissionPRStatusEntry } from "./missionPRStatusEntry";
  * Pull-request status total and entry list.
  */
 export interface MissionPRStatusSummary {
-  items: MissionPRStatusEntry[];
   total: number;
+  items: MissionPRStatusEntry[];
 }

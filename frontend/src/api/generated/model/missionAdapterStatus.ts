@@ -10,8 +10,8 @@
  */
 export interface MissionAdapterStatus {
   enabled: boolean;
-  poll_interval_seconds: number;
-  project_number: number;
   project_owner: string;
+  project_number: number;
   self_repo: string;
+  poll_interval_seconds: number;
 }

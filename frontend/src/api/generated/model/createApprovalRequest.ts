@@ -10,11 +10,11 @@ import type { CreateApprovalRequestMissionCardKind } from "./createApprovalReque
  * Request body for `POST /api/v1/mission/approvals`.
  */
 export interface CreateApprovalRequest {
-  action_key?: string | null;
-  expires_at?: string | null;
-  mission_card_kind: CreateApprovalRequestMissionCardKind;
-  mission_card_number: number;
-  mission_source_repo: string;
   policy_key: string;
   scope_type: string;
+  mission_source_repo: string;
+  mission_card_kind: CreateApprovalRequestMissionCardKind;
+  mission_card_number: number;
+  action_key?: string | null;
+  expires_at?: string | null;
 }

@@ -4,6 +4,7 @@
  * Mission Control API
  * OpenAPI spec version: 0.1.0
  */
+import type { CurrentPrincipalDecisionView } from "./currentPrincipalDecisionView";
 import type { EffectiveDecisionView } from "./effectiveDecisionView";
 import type { LifecycleEventView } from "./lifecycleEventView";
 import type { QuorumRequirementView } from "./quorumRequirementView";
@@ -13,25 +14,33 @@ import type { QuorumRequirementView } from "./quorumRequirementView";
 
 Fully backend-derived: the frontend must not reconstruct supersession
 chains, effective decisions, quorum, or mission effect from any of this
-response's fields -- every one of those is computed here.
+response's fields -- every one of those is computed here. `can_decide`
+and `current_principal_decision` are likewise fully backend-derived
+(Slice 5B Checkpoint A): they are caller-specific, resolved from
+server-verified authenticated identity only, and `can_decide` reuses
+the exact same eligibility check the mutation routes re-run at command
+time (`can_principal_decide`) -- never a second authorization
+algorithm.
  */
 export interface ApprovalDetailResponse {
-  action_key: string | null;
-  created_at: string;
-  decision_rule: string;
-  effective_decisions: EffectiveDecisionView[];
-  expires_at: string | null;
-  lifecycle: LifecycleEventView[];
-  missing_requirements: string[];
+  request_id: string;
+  status: string;
+  mission_source_repo: string;
   mission_card_kind: string;
   mission_card_number: number;
-  mission_effect: string | null;
-  mission_source_repo: string;
+  action_key: string | null;
   policy_key: string;
   policy_version: number;
-  quorum_requirements: QuorumRequirementView[];
+  decision_rule: string;
   quorum_satisfied: boolean;
-  request_id: string;
+  quorum_requirements: QuorumRequirementView[];
+  missing_requirements: string[];
+  effective_decisions: EffectiveDecisionView[];
+  lifecycle: LifecycleEventView[];
+  created_at: string;
+  expires_at: string | null;
   resolved_at: string | null;
-  status: string;
+  mission_effect: string | null;
+  can_decide: boolean;
+  current_principal_decision: CurrentPrincipalDecisionView | null;
 }

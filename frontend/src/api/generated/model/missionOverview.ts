@@ -14,10 +14,10 @@ import type { MissionWorkflowSummary } from "./missionWorkflowSummary";
  * Composite read-only Mission Control dashboard snapshot.
  */
 export interface MissionOverview {
-  adapter: MissionAdapterStatus;
   generated_at: string;
+  adapter: MissionAdapterStatus;
+  sync: MissionSyncStatus | null;
   projections: MissionProjectionSummary;
   quarantine: MissionQuarantineSummary;
-  sync: MissionSyncStatus | null;
   workflow: MissionWorkflowSummary;
 }

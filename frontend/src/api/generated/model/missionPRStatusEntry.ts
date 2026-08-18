@@ -9,10 +9,10 @@
  * Read-only pull-request status projected from a sync run.
  */
 export interface MissionPRStatusEntry {
-  check_status: string | null;
-  projected_at: string;
-  source_id: string;
   source_type: string;
-  source_url: string | null;
+  source_id: string;
   state: string | null;
+  check_status: string | null;
+  source_url: string | null;
+  projected_at: string;
 }

@@ -427,6 +427,48 @@ class TestIdempotencyKeyOpenApiContract:
             ), f"{method.upper()} {path} must require Idempotency-Key"
 
 
+class TestSlice5BCheckpointAOpenApiContract:
+    """Slice 5B Checkpoint A OpenAPI pins: the generated Orval client must
+    see these fields/parameters, so a regression here would silently break
+    the generated frontend contract rather than fail loudly here first."""
+
+    def test_mission_card_requires_source_repo(self) -> None:
+        from app.main import app as real_app
+
+        schema = real_app.openapi()
+        mission_card = schema["components"]["schemas"]["MissionCard"]
+        assert "source_repo" in mission_card.get("required", [])
+        assert mission_card["properties"]["source_repo"]["type"] == "string"
+
+    def test_list_route_exposes_mission_filter_query_params(self) -> None:
+        from app.main import app as real_app
+
+        schema = real_app.openapi()
+        operation = schema["paths"]["/api/v1/mission/approvals"]["get"]
+        query_param_names = {
+            param["name"] for param in operation.get("parameters", []) if param["in"] == "query"
+        }
+        assert {"mission_source_repo", "mission_card_kind", "mission_card_number"} <= (
+            query_param_names
+        )
+
+    def test_approval_detail_response_requires_can_decide(self) -> None:
+        from app.main import app as real_app
+
+        schema = real_app.openapi()
+        detail_response = schema["components"]["schemas"]["ApprovalDetailResponse"]
+        assert "can_decide" in detail_response.get("required", [])
+        assert detail_response["properties"]["can_decide"]["type"] == "boolean"
+
+    def test_approval_detail_response_has_current_principal_decision_schema(self) -> None:
+        from app.main import app as real_app
+
+        schema = real_app.openapi()
+        assert "CurrentPrincipalDecisionView" in schema["components"]["schemas"]
+        detail_response = schema["components"]["schemas"]["ApprovalDetailResponse"]
+        assert "current_principal_decision" in detail_response["properties"]
+
+
 class TestReadApi:
     @pytest.mark.asyncio
     async def test_list_returns_created_request(

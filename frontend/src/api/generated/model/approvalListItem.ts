@@ -9,14 +9,14 @@
  * One row of `GET /api/v1/mission/approvals`.
  */
 export interface ApprovalListItem {
-  action_key: string | null;
-  created_at: string;
-  expires_at: string | null;
-  mission_card_kind: string;
-  mission_card_number: number;
-  mission_source_repo: string;
-  policy_key: string;
-  policy_version: number;
   request_id: string;
   status: string;
+  mission_source_repo: string;
+  mission_card_kind: string;
+  mission_card_number: number;
+  action_key: string | null;
+  policy_key: string;
+  policy_version: number;
+  created_at: string;
+  expires_at: string | null;
 }

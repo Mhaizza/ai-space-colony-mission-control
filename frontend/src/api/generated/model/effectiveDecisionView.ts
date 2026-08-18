@@ -9,9 +9,9 @@
  * One currently-effective decision on a request, for the detail read model.
  */
 export interface EffectiveDecisionView {
-  created_at: string;
-  decision: string;
   principal_id: string;
+  decision: string;
   reason: string | null;
   role_slugs_at_decision: string[];
+  created_at: string;
 }

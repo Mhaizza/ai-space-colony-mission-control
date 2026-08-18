@@ -63,9 +63,8 @@ async def list_approvals(
     three filters or none (partial tuples are rejected at the API layer
     before this function is ever called).
     """
-    statement = (
-        select(McApprovalRequest, McApprovalPolicy)
-        .join(McApprovalPolicy, col(McApprovalRequest.policy_id) == col(McApprovalPolicy.id))
+    statement = select(McApprovalRequest, McApprovalPolicy).join(
+        McApprovalPolicy, col(McApprovalRequest.policy_id) == col(McApprovalPolicy.id)
     )
     if (
         mission_source_repo is not None

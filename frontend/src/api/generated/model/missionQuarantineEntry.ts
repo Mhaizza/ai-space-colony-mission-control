@@ -10,10 +10,10 @@
  */
 export interface MissionQuarantineEntry {
   id: string;
+  reason_code: string;
+  source_type: string | null;
+  source_id: string | null;
+  source_url: string | null;
   message: string;
   projected_at: string;
-  reason_code: string;
-  source_id: string | null;
-  source_type: string | null;
-  source_url: string | null;
 }

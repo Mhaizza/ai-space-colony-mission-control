@@ -9,13 +9,13 @@
  * Response body for the submit-decision and supersede-decision routes.
  */
 export interface ApprovalDecisionResponse {
-  created_at: string;
-  decision: string;
-  decision_id: string;
-  mission_effect: string | null;
-  principal_id: string;
-  quorum_satisfied: boolean;
-  reason: string | null;
   request_id: string;
+  decision_id: string;
+  principal_id: string;
+  decision: string;
+  reason: string | null;
   status: string;
+  quorum_satisfied: boolean;
+  mission_effect: string | null;
+  created_at: string;
 }

@@ -11,8 +11,8 @@ import type { MissionWorkflowRecordSummary } from "./missionWorkflowRecordSummar
  * Minimal cards + workflow-record roll-up for the dashboard.
  */
 export interface MissionWorkflowSummary {
-  cards: MissionCard[];
   cards_total: number;
-  records: MissionWorkflowRecordSummary[];
   records_total: number;
+  cards: MissionCard[];
+  records: MissionWorkflowRecordSummary[];
 }

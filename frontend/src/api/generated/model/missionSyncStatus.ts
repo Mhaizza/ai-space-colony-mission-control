@@ -10,10 +10,10 @@
  */
 export interface MissionSyncStatus {
   adapter_key: string;
-  consecutive_failures: number;
-  last_error: string | null;
-  last_finished_at: string | null;
-  last_started_at: string | null;
-  last_success_at: string | null;
   status: string;
+  last_started_at: string | null;
+  last_finished_at: string | null;
+  last_success_at: string | null;
+  last_error: string | null;
+  consecutive_failures: number;
 }

@@ -17,7 +17,7 @@ assignment is not itself meaningful (see `approval_evaluator`'s module
 docstring), only the matching's size is.
  */
 export interface QuorumRequirementView {
+  slot: string;
   eligible_roles: string[];
   satisfied: boolean;
-  slot: string;
 }

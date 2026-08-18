@@ -10,8 +10,8 @@ import type { MissionSourceTypeCount } from "./missionSourceTypeCount";
  * Aggregate projection-record counts across all source types.
  */
 export interface MissionProjectionSummary {
-  by_source_type: MissionSourceTypeCount[];
+  total: number;
   live: number;
   tombstoned: number;
-  total: number;
+  by_source_type: MissionSourceTypeCount[];
 }

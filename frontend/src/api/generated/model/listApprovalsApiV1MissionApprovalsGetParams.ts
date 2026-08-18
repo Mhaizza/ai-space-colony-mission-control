@@ -6,6 +6,9 @@
  */
 
 export type ListApprovalsApiV1MissionApprovalsGetParams = {
+  mission_source_repo?: string | null;
+  mission_card_kind?: "issue" | "pull_request" | null;
+  mission_card_number?: number | null;
   /**
    * @minimum 1
    * @maximum 200

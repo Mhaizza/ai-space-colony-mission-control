@@ -9,11 +9,11 @@
  * Response body for `POST /api/v1/mission/approvals`.
  */
 export interface ApprovalRequestResponse {
-  created_at: string;
-  created_by_principal_id: string;
-  expires_at: string | null;
+  request_id: string;
   policy_key: string;
   policy_version: number;
-  request_id: string;
   status: string;
+  created_by_principal_id: string;
+  created_at: string;
+  expires_at: string | null;
 }

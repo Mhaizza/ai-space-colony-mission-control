@@ -38,178 +38,113 @@ import { customFetch } from "../../mutator";
 type SecondParameter<T extends (...args: never) => unknown> = Parameters<T>[1];
 
 /**
- * Sync-run audit total and a recent-entry window from the mc_sync_audit table (Slice 4). Reads only; never touches GitHub (ADR-23).
- * @summary Read-only sync audit summary
+ * Triggers the same outbound read-only GitHub sync path used by polling. Mutates no GitHub state (ADR-23 D3/D8 manual-refresh exception).
+ * @summary Manual read-only GitHub sync refresh
  */
-export type missionAuditApiV1MissionAuditGetResponse200 = {
-  data: MissionAuditSummary;
+export type refreshMissionProjectionApiV1MissionRefreshPostResponse200 = {
+  data: MissionRefreshResponse;
   status: 200;
 };
 
-export type missionAuditApiV1MissionAuditGetResponseSuccess =
-  missionAuditApiV1MissionAuditGetResponse200 & {
+export type refreshMissionProjectionApiV1MissionRefreshPostResponseSuccess =
+  refreshMissionProjectionApiV1MissionRefreshPostResponse200 & {
     headers: Headers;
   };
-export type missionAuditApiV1MissionAuditGetResponse =
-  missionAuditApiV1MissionAuditGetResponseSuccess;
+export type refreshMissionProjectionApiV1MissionRefreshPostResponse =
+  refreshMissionProjectionApiV1MissionRefreshPostResponseSuccess;
 
-export const getMissionAuditApiV1MissionAuditGetUrl = () => {
-  return `/api/v1/mission/audit`;
+export const getRefreshMissionProjectionApiV1MissionRefreshPostUrl = () => {
+  return `/api/v1/mission/refresh`;
 };
 
-export const missionAuditApiV1MissionAuditGet = async (
+export const refreshMissionProjectionApiV1MissionRefreshPost = async (
   options?: RequestInit,
-): Promise<missionAuditApiV1MissionAuditGetResponse> => {
-  return customFetch<missionAuditApiV1MissionAuditGetResponse>(
-    getMissionAuditApiV1MissionAuditGetUrl(),
+): Promise<refreshMissionProjectionApiV1MissionRefreshPostResponse> => {
+  return customFetch<refreshMissionProjectionApiV1MissionRefreshPostResponse>(
+    getRefreshMissionProjectionApiV1MissionRefreshPostUrl(),
     {
       ...options,
-      method: "GET",
+      method: "POST",
     },
   );
 };
 
-export const getMissionAuditApiV1MissionAuditGetQueryKey = () => {
-  return [`/api/v1/mission/audit`] as const;
-};
-
-export const getMissionAuditApiV1MissionAuditGetQueryOptions = <
-  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-  TError = unknown,
->(options?: {
-  query?: Partial<
-    UseQueryOptions<
-      Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+export const getRefreshMissionProjectionApiV1MissionRefreshPostMutationOptions =
+  <TError = unknown, TContext = unknown>(options?: {
+    mutation?: UseMutationOptions<
+      Awaited<
+        ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>
+      >,
       TError,
-      TData
-    >
-  >;
-  request?: SecondParameter<typeof customFetch>;
-}) => {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-
-  const queryKey =
-    queryOptions?.queryKey ?? getMissionAuditApiV1MissionAuditGetQueryKey();
-
-  const queryFn: QueryFunction<
-    Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
-  > = ({ signal }) =>
-    missionAuditApiV1MissionAuditGet({ signal, ...requestOptions });
-
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
-    Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+      void,
+      TContext
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  }): UseMutationOptions<
+    Awaited<ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>>,
     TError,
-    TData
-  > & { queryKey: DataTag<QueryKey, TData, TError> };
-};
+    void,
+    TContext
+  > => {
+    const mutationKey = ["refreshMissionProjectionApiV1MissionRefreshPost"];
+    const { mutation: mutationOptions, request: requestOptions } = options
+      ? options.mutation &&
+        "mutationKey" in options.mutation &&
+        options.mutation.mutationKey
+        ? options
+        : { ...options, mutation: { ...options.mutation, mutationKey } }
+      : { mutation: { mutationKey }, request: undefined };
 
-export type MissionAuditApiV1MissionAuditGetQueryResult = NonNullable<
-  Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
->;
-export type MissionAuditApiV1MissionAuditGetQueryError = unknown;
+    const mutationFn: MutationFunction<
+      Awaited<
+        ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>
+      >,
+      void
+    > = () => {
+      return refreshMissionProjectionApiV1MissionRefreshPost(requestOptions);
+    };
 
-export function useMissionAuditApiV1MissionAuditGet<
-  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-  TError = unknown,
->(
-  options: {
-    query: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-        TError,
-        TData
-      >
-    > &
-      Pick<
-        DefinedInitialDataOptions<
-          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-          TError,
-          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
-        >,
-        "initialData"
-      >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): DefinedUseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-};
-export function useMissionAuditApiV1MissionAuditGet<
-  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-  TError = unknown,
->(
-  options?: {
-    query?: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-        TError,
-        TData
-      >
-    > &
-      Pick<
-        UndefinedInitialDataOptions<
-          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-          TError,
-          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
-        >,
-        "initialData"
-      >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): UseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-};
-export function useMissionAuditApiV1MissionAuditGet<
-  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-  TError = unknown,
->(
-  options?: {
-    query?: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-        TError,
-        TData
-      >
-    >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): UseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-};
+    return { mutationFn, ...mutationOptions };
+  };
+
+export type RefreshMissionProjectionApiV1MissionRefreshPostMutationResult =
+  NonNullable<
+    Awaited<ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>>
+  >;
+
+export type RefreshMissionProjectionApiV1MissionRefreshPostMutationError =
+  unknown;
+
 /**
- * @summary Read-only sync audit summary
+ * @summary Manual read-only GitHub sync refresh
  */
-
-export function useMissionAuditApiV1MissionAuditGet<
-  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+export const useRefreshMissionProjectionApiV1MissionRefreshPost = <
   TError = unknown,
+  TContext = unknown,
 >(
   options?: {
-    query?: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
-        TError,
-        TData
-      >
+    mutation?: UseMutationOptions<
+      Awaited<
+        ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>
+      >,
+      TError,
+      void,
+      TContext
     >;
     request?: SecondParameter<typeof customFetch>;
   },
   queryClient?: QueryClient,
-): UseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-} {
-  const queryOptions = getMissionAuditApiV1MissionAuditGetQueryOptions(options);
-
-  const query = useQuery(queryOptions, queryClient) as UseQueryResult<
-    TData,
-    TError
-  > & { queryKey: DataTag<QueryKey, TData, TError> };
-
-  return { ...query, queryKey: queryOptions.queryKey };
-}
-
+): UseMutationResult<
+  Awaited<ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>>,
+  TError,
+  void,
+  TContext
+> => {
+  return useMutation(
+    getRefreshMissionProjectionApiV1MissionRefreshPostMutationOptions(options),
+    queryClient,
+  );
+};
 /**
  * Composite read-only snapshot derived from the Slice 3 projection tables: adapter/sync health, projection counts, quarantine visibility, and a minimal workflow roll-up. Reads only; never touches GitHub (ADR-23).
  * @summary Read-only Mission Control dashboard overview
@@ -417,181 +352,6 @@ export function useMissionOverviewApiV1MissionOverviewGet<
     params,
     options,
   );
-
-  const query = useQuery(queryOptions, queryClient) as UseQueryResult<
-    TData,
-    TError
-  > & { queryKey: DataTag<QueryKey, TData, TError> };
-
-  return { ...query, queryKey: queryOptions.queryKey };
-}
-
-/**
- * Live CI/status projection records (check runs/suites, commit statuses, workflow runs) from mc_projection_record. Raw payloads are never exposed on the read surface (ADR-23).
- * @summary Read-only CI / PR status summary
- */
-export type missionPrStatusApiV1MissionPrStatusGetResponse200 = {
-  data: MissionPRStatusSummary;
-  status: 200;
-};
-
-export type missionPrStatusApiV1MissionPrStatusGetResponseSuccess =
-  missionPrStatusApiV1MissionPrStatusGetResponse200 & {
-    headers: Headers;
-  };
-export type missionPrStatusApiV1MissionPrStatusGetResponse =
-  missionPrStatusApiV1MissionPrStatusGetResponseSuccess;
-
-export const getMissionPrStatusApiV1MissionPrStatusGetUrl = () => {
-  return `/api/v1/mission/pr-status`;
-};
-
-export const missionPrStatusApiV1MissionPrStatusGet = async (
-  options?: RequestInit,
-): Promise<missionPrStatusApiV1MissionPrStatusGetResponse> => {
-  return customFetch<missionPrStatusApiV1MissionPrStatusGetResponse>(
-    getMissionPrStatusApiV1MissionPrStatusGetUrl(),
-    {
-      ...options,
-      method: "GET",
-    },
-  );
-};
-
-export const getMissionPrStatusApiV1MissionPrStatusGetQueryKey = () => {
-  return [`/api/v1/mission/pr-status`] as const;
-};
-
-export const getMissionPrStatusApiV1MissionPrStatusGetQueryOptions = <
-  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-  TError = unknown,
->(options?: {
-  query?: Partial<
-    UseQueryOptions<
-      Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-      TError,
-      TData
-    >
-  >;
-  request?: SecondParameter<typeof customFetch>;
-}) => {
-  const { query: queryOptions, request: requestOptions } = options ?? {};
-
-  const queryKey =
-    queryOptions?.queryKey ??
-    getMissionPrStatusApiV1MissionPrStatusGetQueryKey();
-
-  const queryFn: QueryFunction<
-    Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
-  > = ({ signal }) =>
-    missionPrStatusApiV1MissionPrStatusGet({ signal, ...requestOptions });
-
-  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
-    Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-    TError,
-    TData
-  > & { queryKey: DataTag<QueryKey, TData, TError> };
-};
-
-export type MissionPrStatusApiV1MissionPrStatusGetQueryResult = NonNullable<
-  Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
->;
-export type MissionPrStatusApiV1MissionPrStatusGetQueryError = unknown;
-
-export function useMissionPrStatusApiV1MissionPrStatusGet<
-  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-  TError = unknown,
->(
-  options: {
-    query: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-        TError,
-        TData
-      >
-    > &
-      Pick<
-        DefinedInitialDataOptions<
-          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-          TError,
-          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
-        >,
-        "initialData"
-      >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): DefinedUseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-};
-export function useMissionPrStatusApiV1MissionPrStatusGet<
-  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-  TError = unknown,
->(
-  options?: {
-    query?: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-        TError,
-        TData
-      >
-    > &
-      Pick<
-        UndefinedInitialDataOptions<
-          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-          TError,
-          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
-        >,
-        "initialData"
-      >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): UseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-};
-export function useMissionPrStatusApiV1MissionPrStatusGet<
-  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-  TError = unknown,
->(
-  options?: {
-    query?: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-        TError,
-        TData
-      >
-    >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): UseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-};
-/**
- * @summary Read-only CI / PR status summary
- */
-
-export function useMissionPrStatusApiV1MissionPrStatusGet<
-  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-  TError = unknown,
->(
-  options?: {
-    query?: Partial<
-      UseQueryOptions<
-        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
-        TError,
-        TData
-      >
-    >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): UseQueryResult<TData, TError> & {
-  queryKey: DataTag<QueryKey, TData, TError>;
-} {
-  const queryOptions =
-    getMissionPrStatusApiV1MissionPrStatusGetQueryOptions(options);
 
   const query = useQuery(queryOptions, queryClient) as UseQueryResult<
     TData,
@@ -830,114 +590,6 @@ export function useMissionQuarantineApiV1MissionQuarantineGet<
 }
 
 /**
- * Triggers the same outbound read-only GitHub sync path used by polling. Mutates no GitHub state (ADR-23 D3/D8 manual-refresh exception).
- * @summary Manual read-only GitHub sync refresh
- */
-export type refreshMissionProjectionApiV1MissionRefreshPostResponse200 = {
-  data: MissionRefreshResponse;
-  status: 200;
-};
-
-export type refreshMissionProjectionApiV1MissionRefreshPostResponseSuccess =
-  refreshMissionProjectionApiV1MissionRefreshPostResponse200 & {
-    headers: Headers;
-  };
-export type refreshMissionProjectionApiV1MissionRefreshPostResponse =
-  refreshMissionProjectionApiV1MissionRefreshPostResponseSuccess;
-
-export const getRefreshMissionProjectionApiV1MissionRefreshPostUrl = () => {
-  return `/api/v1/mission/refresh`;
-};
-
-export const refreshMissionProjectionApiV1MissionRefreshPost = async (
-  options?: RequestInit,
-): Promise<refreshMissionProjectionApiV1MissionRefreshPostResponse> => {
-  return customFetch<refreshMissionProjectionApiV1MissionRefreshPostResponse>(
-    getRefreshMissionProjectionApiV1MissionRefreshPostUrl(),
-    {
-      ...options,
-      method: "POST",
-    },
-  );
-};
-
-export const getRefreshMissionProjectionApiV1MissionRefreshPostMutationOptions =
-  <TError = unknown, TContext = unknown>(options?: {
-    mutation?: UseMutationOptions<
-      Awaited<
-        ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>
-      >,
-      TError,
-      void,
-      TContext
-    >;
-    request?: SecondParameter<typeof customFetch>;
-  }): UseMutationOptions<
-    Awaited<ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>>,
-    TError,
-    void,
-    TContext
-  > => {
-    const mutationKey = ["refreshMissionProjectionApiV1MissionRefreshPost"];
-    const { mutation: mutationOptions, request: requestOptions } = options
-      ? options.mutation &&
-        "mutationKey" in options.mutation &&
-        options.mutation.mutationKey
-        ? options
-        : { ...options, mutation: { ...options.mutation, mutationKey } }
-      : { mutation: { mutationKey }, request: undefined };
-
-    const mutationFn: MutationFunction<
-      Awaited<
-        ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>
-      >,
-      void
-    > = () => {
-      return refreshMissionProjectionApiV1MissionRefreshPost(requestOptions);
-    };
-
-    return { mutationFn, ...mutationOptions };
-  };
-
-export type RefreshMissionProjectionApiV1MissionRefreshPostMutationResult =
-  NonNullable<
-    Awaited<ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>>
-  >;
-
-export type RefreshMissionProjectionApiV1MissionRefreshPostMutationError =
-  unknown;
-
-/**
- * @summary Manual read-only GitHub sync refresh
- */
-export const useRefreshMissionProjectionApiV1MissionRefreshPost = <
-  TError = unknown,
-  TContext = unknown,
->(
-  options?: {
-    mutation?: UseMutationOptions<
-      Awaited<
-        ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>
-      >,
-      TError,
-      void,
-      TContext
-    >;
-    request?: SecondParameter<typeof customFetch>;
-  },
-  queryClient?: QueryClient,
-): UseMutationResult<
-  Awaited<ReturnType<typeof refreshMissionProjectionApiV1MissionRefreshPost>>,
-  TError,
-  void,
-  TContext
-> => {
-  return useMutation(
-    getRefreshMissionProjectionApiV1MissionRefreshPostMutationOptions(options),
-    queryClient,
-  );
-};
-/**
  * Minimal (v0.1) cards + workflow-record roll-up derived from projected project items and ai-workflow-record:v1 comments. Payload-local parsing only; assignment authority derivation is intentionally excluded.
  * @summary Read-only workflow and cards summary
  */
@@ -1144,6 +796,354 @@ export function useMissionWorkflowApiV1MissionWorkflowGet<
     params,
     options,
   );
+
+  const query = useQuery(queryOptions, queryClient) as UseQueryResult<
+    TData,
+    TError
+  > & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Sync-run audit total and a recent-entry window from the mc_sync_audit table (Slice 4). Reads only; never touches GitHub (ADR-23).
+ * @summary Read-only sync audit summary
+ */
+export type missionAuditApiV1MissionAuditGetResponse200 = {
+  data: MissionAuditSummary;
+  status: 200;
+};
+
+export type missionAuditApiV1MissionAuditGetResponseSuccess =
+  missionAuditApiV1MissionAuditGetResponse200 & {
+    headers: Headers;
+  };
+export type missionAuditApiV1MissionAuditGetResponse =
+  missionAuditApiV1MissionAuditGetResponseSuccess;
+
+export const getMissionAuditApiV1MissionAuditGetUrl = () => {
+  return `/api/v1/mission/audit`;
+};
+
+export const missionAuditApiV1MissionAuditGet = async (
+  options?: RequestInit,
+): Promise<missionAuditApiV1MissionAuditGetResponse> => {
+  return customFetch<missionAuditApiV1MissionAuditGetResponse>(
+    getMissionAuditApiV1MissionAuditGetUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getMissionAuditApiV1MissionAuditGetQueryKey = () => {
+  return [`/api/v1/mission/audit`] as const;
+};
+
+export const getMissionAuditApiV1MissionAuditGetQueryOptions = <
+  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+  TError = unknown,
+>(options?: {
+  query?: Partial<
+    UseQueryOptions<
+      Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+      TError,
+      TData
+    >
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ?? getMissionAuditApiV1MissionAuditGetQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
+  > = ({ signal }) =>
+    missionAuditApiV1MissionAuditGet({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+    TError,
+    TData
+  > & { queryKey: DataTag<QueryKey, TData, TError> };
+};
+
+export type MissionAuditApiV1MissionAuditGetQueryResult = NonNullable<
+  Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
+>;
+export type MissionAuditApiV1MissionAuditGetQueryError = unknown;
+
+export function useMissionAuditApiV1MissionAuditGet<
+  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+  TError = unknown,
+>(
+  options: {
+    query: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+        TError,
+        TData
+      >
+    > &
+      Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+          TError,
+          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
+        >,
+        "initialData"
+      >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): DefinedUseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+};
+export function useMissionAuditApiV1MissionAuditGet<
+  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+  TError = unknown,
+>(
+  options?: {
+    query?: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+        TError,
+        TData
+      >
+    > &
+      Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+          TError,
+          Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>
+        >,
+        "initialData"
+      >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): UseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+};
+export function useMissionAuditApiV1MissionAuditGet<
+  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+  TError = unknown,
+>(
+  options?: {
+    query?: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+        TError,
+        TData
+      >
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): UseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+};
+/**
+ * @summary Read-only sync audit summary
+ */
+
+export function useMissionAuditApiV1MissionAuditGet<
+  TData = Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+  TError = unknown,
+>(
+  options?: {
+    query?: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionAuditApiV1MissionAuditGet>>,
+        TError,
+        TData
+      >
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): UseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+} {
+  const queryOptions = getMissionAuditApiV1MissionAuditGetQueryOptions(options);
+
+  const query = useQuery(queryOptions, queryClient) as UseQueryResult<
+    TData,
+    TError
+  > & { queryKey: DataTag<QueryKey, TData, TError> };
+
+  return { ...query, queryKey: queryOptions.queryKey };
+}
+
+/**
+ * Live CI/status projection records (check runs/suites, commit statuses, workflow runs) from mc_projection_record. Raw payloads are never exposed on the read surface (ADR-23).
+ * @summary Read-only CI / PR status summary
+ */
+export type missionPrStatusApiV1MissionPrStatusGetResponse200 = {
+  data: MissionPRStatusSummary;
+  status: 200;
+};
+
+export type missionPrStatusApiV1MissionPrStatusGetResponseSuccess =
+  missionPrStatusApiV1MissionPrStatusGetResponse200 & {
+    headers: Headers;
+  };
+export type missionPrStatusApiV1MissionPrStatusGetResponse =
+  missionPrStatusApiV1MissionPrStatusGetResponseSuccess;
+
+export const getMissionPrStatusApiV1MissionPrStatusGetUrl = () => {
+  return `/api/v1/mission/pr-status`;
+};
+
+export const missionPrStatusApiV1MissionPrStatusGet = async (
+  options?: RequestInit,
+): Promise<missionPrStatusApiV1MissionPrStatusGetResponse> => {
+  return customFetch<missionPrStatusApiV1MissionPrStatusGetResponse>(
+    getMissionPrStatusApiV1MissionPrStatusGetUrl(),
+    {
+      ...options,
+      method: "GET",
+    },
+  );
+};
+
+export const getMissionPrStatusApiV1MissionPrStatusGetQueryKey = () => {
+  return [`/api/v1/mission/pr-status`] as const;
+};
+
+export const getMissionPrStatusApiV1MissionPrStatusGetQueryOptions = <
+  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+  TError = unknown,
+>(options?: {
+  query?: Partial<
+    UseQueryOptions<
+      Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+      TError,
+      TData
+    >
+  >;
+  request?: SecondParameter<typeof customFetch>;
+}) => {
+  const { query: queryOptions, request: requestOptions } = options ?? {};
+
+  const queryKey =
+    queryOptions?.queryKey ??
+    getMissionPrStatusApiV1MissionPrStatusGetQueryKey();
+
+  const queryFn: QueryFunction<
+    Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
+  > = ({ signal }) =>
+    missionPrStatusApiV1MissionPrStatusGet({ signal, ...requestOptions });
+
+  return { queryKey, queryFn, ...queryOptions } as UseQueryOptions<
+    Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+    TError,
+    TData
+  > & { queryKey: DataTag<QueryKey, TData, TError> };
+};
+
+export type MissionPrStatusApiV1MissionPrStatusGetQueryResult = NonNullable<
+  Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
+>;
+export type MissionPrStatusApiV1MissionPrStatusGetQueryError = unknown;
+
+export function useMissionPrStatusApiV1MissionPrStatusGet<
+  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+  TError = unknown,
+>(
+  options: {
+    query: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+        TError,
+        TData
+      >
+    > &
+      Pick<
+        DefinedInitialDataOptions<
+          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+          TError,
+          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
+        >,
+        "initialData"
+      >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): DefinedUseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+};
+export function useMissionPrStatusApiV1MissionPrStatusGet<
+  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+  TError = unknown,
+>(
+  options?: {
+    query?: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+        TError,
+        TData
+      >
+    > &
+      Pick<
+        UndefinedInitialDataOptions<
+          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+          TError,
+          Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>
+        >,
+        "initialData"
+      >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): UseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+};
+export function useMissionPrStatusApiV1MissionPrStatusGet<
+  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+  TError = unknown,
+>(
+  options?: {
+    query?: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+        TError,
+        TData
+      >
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): UseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+};
+/**
+ * @summary Read-only CI / PR status summary
+ */
+
+export function useMissionPrStatusApiV1MissionPrStatusGet<
+  TData = Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+  TError = unknown,
+>(
+  options?: {
+    query?: Partial<
+      UseQueryOptions<
+        Awaited<ReturnType<typeof missionPrStatusApiV1MissionPrStatusGet>>,
+        TError,
+        TData
+      >
+    >;
+    request?: SecondParameter<typeof customFetch>;
+  },
+  queryClient?: QueryClient,
+): UseQueryResult<TData, TError> & {
+  queryKey: DataTag<QueryKey, TData, TError>;
+} {
+  const queryOptions =
+    getMissionPrStatusApiV1MissionPrStatusGetQueryOptions(options);
 
   const query = useQuery(queryOptions, queryClient) as UseQueryResult<
     TData,

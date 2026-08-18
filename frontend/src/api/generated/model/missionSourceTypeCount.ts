@@ -9,7 +9,7 @@
  * Live/tombstoned projection counts for a single source type.
  */
 export interface MissionSourceTypeCount {
-  live: number;
   source_type: string;
+  live: number;
   tombstoned: number;
 }

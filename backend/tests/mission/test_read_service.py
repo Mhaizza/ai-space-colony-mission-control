@@ -287,9 +287,7 @@ class TestCardSourceRepoTrust:
 
     @pytest.mark.asyncio
     async def test_name_with_owner_missing_is_omitted_not_fabricated(self) -> None:
-        item = self._item(
-            {"__typename": "Issue", "number": 148, "repository": {"id": "R_1"}}
-        )
+        item = self._item({"__typename": "Issue", "number": 148, "repository": {"id": "R_1"}})
         session = SequentialSession([[item], [], [], []])
         summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
         assert summary.cards_total == 0

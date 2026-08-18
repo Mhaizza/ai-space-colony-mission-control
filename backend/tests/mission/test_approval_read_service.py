@@ -485,7 +485,9 @@ class TestCallerAwareCapability:
             policy = await _make_policy(session, TWO_SLOT_POLICY)
             request = await _make_request(session, policy, creator)
 
-            detail = await get_approval_detail(session, request.id, principal=_resolved(outsider, []))
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(outsider, [])
+            )
         assert detail is not None
         assert detail.can_decide is False
 
