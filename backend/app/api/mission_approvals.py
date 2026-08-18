@@ -39,7 +39,7 @@ from app.mission.approval_service import (
     submit_decision,
     supersede_decision,
 )
-from app.mission.principal_resolver import PrincipalResolutionError
+from app.mission.principal_resolver import PrincipalResolutionError, resolve_principal
 from app.schemas.mission import MissionCardKind
 from app.schemas.mission_approvals import (
     ApprovalDecisionResponse,
@@ -132,9 +132,23 @@ async def get_approval_detail(
     auth: AuthContext = AUTH_DEP,
     session: AsyncSession = SESSION_DEP,
 ) -> ApprovalDetailResponse:
-    """Return the detail view for one approval request."""
-    _ = auth
-    detail = await approval_read_service.get_approval_detail(session, request_id)
+    """Return the detail view for one approval request.
+
+    The caller identity for `can_decide`/`current_principal_decision` is
+    resolved here from server-verified `AuthContext` -- never from any
+    client-supplied value. An unregistered/disabled caller fails closed
+    with the same 403 the mutation routes already use for that case
+    (`PrincipalResolutionError` -> `to_http_exception`); this read route
+    never silently grants capability by falling back to an unresolved
+    caller.
+    """
+    try:
+        principal = await resolve_principal(auth, session)
+    except PrincipalResolutionError as exc:
+        raise to_http_exception(exc) from exc
+    detail = await approval_read_service.get_approval_detail(
+        session, request_id, principal=principal
+    )
     if detail is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

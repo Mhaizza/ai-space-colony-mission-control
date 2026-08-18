@@ -129,12 +129,31 @@ class QuorumRequirementView(SQLModel):
     satisfied: bool
 
 
+class CurrentPrincipalDecisionView(SQLModel):
+    """The authenticated caller's own currently-effective decision on a request.
+
+    Caller-specific and derived from server-verified authenticated identity
+    only -- never another principal's decision (Slice 5B Checkpoint A).
+    """
+
+    decision_id: UUID
+    decision: str
+    reason: str | None
+    created_at: datetime
+
+
 class ApprovalDetailResponse(SQLModel):
     """Response body for `GET /api/v1/mission/approvals/{request_id}`.
 
     Fully backend-derived: the frontend must not reconstruct supersession
     chains, effective decisions, quorum, or mission effect from any of this
-    response's fields -- every one of those is computed here.
+    response's fields -- every one of those is computed here. `can_decide`
+    and `current_principal_decision` are likewise fully backend-derived
+    (Slice 5B Checkpoint A): they are caller-specific, resolved from
+    server-verified authenticated identity only, and `can_decide` reuses
+    the exact same eligibility check the mutation routes re-run at command
+    time (`can_principal_decide`) -- never a second authorization
+    algorithm.
     """
 
     request_id: UUID
@@ -155,3 +174,5 @@ class ApprovalDetailResponse(SQLModel):
     expires_at: datetime | None
     resolved_at: datetime | None
     mission_effect: str | None
+    can_decide: bool
+    current_principal_decision: CurrentPrincipalDecisionView | None

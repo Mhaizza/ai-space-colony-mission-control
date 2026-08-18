@@ -359,6 +359,35 @@ def _authorize_decision(principal: ResolvedPrincipal, definition: ApprovalPolicy
         )
 
 
+def can_principal_decide(
+    *,
+    principal: ResolvedPrincipal,
+    request: McApprovalRequest,
+    definition: ApprovalPolicyDefinition,
+) -> bool:
+    """Shared read/write decision-eligibility signal (Slice 5B Checkpoint A).
+
+    This is the *only* place `can_decide` is computed: it directly reuses
+    `_authorize_decision` -- the same check `submit_decision` and
+    `supersede_decision` both call before writing -- plus the same
+    request-pending gate those two functions apply before authorizing at
+    all. No second/independent eligibility algorithm exists anywhere in
+    `approval_read_service.py`.
+
+    This is a UX capability signal only. Every mutation command still calls
+    `_authorize_decision` (and re-checks `request.status`) itself at command
+    time under its own row lock; a `True` result here is never treated as
+    authorization by any write path.
+    """
+    if request.status != "pending":
+        return False
+    try:
+        _authorize_decision(principal, definition)
+    except ApprovalServiceError:
+        return False
+    return True
+
+
 async def effective_decisions(session: AsyncSession, request_id: UUID) -> list[McApprovalDecision]:
     all_decisions = (
         await session.exec(

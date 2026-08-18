@@ -483,6 +483,25 @@ class TestReadApi:
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "approval_request_not_found"
 
+    @pytest.mark.asyncio
+    async def test_detail_exposes_caller_capability_fields(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_policy(maker)
+        app = _build_app(maker, auth=_auth_for("creator"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            created = await client.post(
+                "/api/v1/mission/approvals", json=CREATE_BODY, headers={"Idempotency-Key": "k1"}
+            )
+            request_id = created.json()["request_id"]
+            response = await client.get(f"/api/v1/mission/approvals/{request_id}")
+        assert response.status_code == 200
+        body = response.json()
+        assert body["can_decide"] is True
+        assert body["current_principal_decision"] is None
+
 
 class TestMissionScopedListFiltersApi:
     """Query-parameter contract for the Mission filter tuple on the existing

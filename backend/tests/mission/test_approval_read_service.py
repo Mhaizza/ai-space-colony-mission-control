@@ -26,6 +26,7 @@ from app.core.time import utcnow
 from app.mission.approval_evaluator import EffectiveDecision, evaluate_approval
 from app.mission.approval_policy import ApprovalPolicyDefinition
 from app.mission.approval_read_service import get_approval_detail, list_approvals
+from app.mission.principal_resolver import ResolvedPrincipal
 from app.models.mc_approval import (
     McApprovalDecision,
     McApprovalPolicy,
@@ -33,6 +34,21 @@ from app.models.mc_approval import (
     McApprovalRequest,
     McPrincipal,
 )
+
+
+def _resolved(principal: McPrincipal, roles: list[str]) -> ResolvedPrincipal:
+    """Build the `ResolvedPrincipal` value object `get_approval_detail` expects,
+    from a seeded `McPrincipal` row plus the roles already granted to it --
+    mirrors what `resolve_principal()` would return for this identity,
+    without a second DB round trip."""
+    return ResolvedPrincipal(
+        id=principal.id,
+        principal_type=principal.principal_type,
+        display_name=principal.display_name,
+        trust_level=principal.trust_level,
+        enabled=principal.enabled,
+        role_slugs=frozenset(roles),
+    )
 
 
 @asynccontextmanager
@@ -126,17 +142,23 @@ async def _cast_decision(
     principal: McPrincipal,
     decision: str,
     roles: list[str],
+    *,
+    reason: str | None = None,
+    supersedes_decision_id: object = None,
 ) -> McApprovalDecision:
     row = McApprovalDecision(
         request_id=request.id,
         principal_id=principal.id,
         decision=decision,
+        reason=reason,
         role_slugs_at_decision=roles,
         trust_level_at_decision="standard",
         created_at=utcnow(),
+        supersedes_decision_id=supersedes_decision_id,
     )
     session.add(row)
     await session.commit()
+    await session.refresh(row)
     return row
 
 
@@ -181,7 +203,9 @@ class TestQuorumRequirementsShape:
             policy = await _make_policy(session, TWO_SLOT_POLICY)
             request = await _make_request(session, policy, creator)
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
             assert {q.slot for q in detail.quorum_requirements} == {"a", "b"}
             by_slot = {q.slot: q for q in detail.quorum_requirements}
@@ -197,7 +221,9 @@ class TestQuorumRequirementsShape:
             request = await _make_request(session, policy, creator)
             await _cast_decision(session, request, voter_a, "approve", ["technical-director"])
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
 
             definition = ApprovalPolicyDefinition.model_validate(TWO_SLOT_POLICY)
@@ -234,7 +260,9 @@ class TestQuorumRequirementsShape:
             )
             await _cast_decision(session, request, qa_only, "approve", ["qa-reviewer"])
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
 
             definition = ApprovalPolicyDefinition.model_validate(MULTI_ROLE_POLICY)
@@ -276,7 +304,9 @@ class TestQuorumRequirementsShape:
             request = await _make_request(session, policy, creator)
             await _cast_decision(session, request, voter_a, "approve", ["technical-director"])
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
 
             # Every slot exposes eligible_roles (who can still approve).
@@ -295,7 +325,10 @@ class TestQuorumRequirementsShape:
         from uuid import uuid4
 
         async with _engine_and_session() as session:
-            detail = await get_approval_detail(session, uuid4())
+            creator = await _make_principal(session, ["technical-director"])
+            detail = await get_approval_detail(
+                session, uuid4(), principal=_resolved(creator, ["technical-director"])
+            )
         assert detail is None
 
 
@@ -417,3 +450,143 @@ class TestMissionScopedListFilters:
             item.mission_source_repo == "Mhaizza/ai-space-colony-mission-control"
             for item in page.items
         )
+
+
+TRUST_GATED_POLICY: dict[str, object] = {
+    **TWO_SLOT_POLICY,
+    "trust_requirements": ["trusted"],
+}
+
+
+class TestCallerAwareCapability:
+    """`can_decide` and `current_principal_decision` (Checkpoint A3): both
+    must be caller-specific and derived from the same eligibility/
+    supersession-aware machinery the write path uses -- never a second
+    algorithm."""
+
+    @pytest.mark.asyncio
+    async def test_eligible_pending_caller_can_decide_true(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.can_decide is True
+
+    @pytest.mark.asyncio
+    async def test_ineligible_role_can_decide_false(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            outsider = await _make_principal(session, [], display_name="Outsider")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(session, request.id, principal=_resolved(outsider, []))
+        assert detail is not None
+        assert detail.can_decide is False
+
+    @pytest.mark.asyncio
+    async def test_insufficient_trust_can_decide_false(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TRUST_GATED_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.can_decide is False
+
+    @pytest.mark.asyncio
+    async def test_terminal_request_can_decide_false(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator, status="approved")
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.can_decide is False
+
+    @pytest.mark.asyncio
+    async def test_no_own_effective_decision_returns_null(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is None
+
+    @pytest.mark.asyncio
+    async def test_own_effective_decision_returns_its_view(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            voter = await _make_principal(session, ["technical-director"], display_name="V")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+            decision = await _cast_decision(
+                session, request, voter, "approve", ["technical-director"], reason="looks good"
+            )
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(voter, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is not None
+        assert detail.current_principal_decision.decision_id == decision.id
+        assert detail.current_principal_decision.decision == "approve"
+        assert detail.current_principal_decision.reason == "looks good"
+
+    @pytest.mark.asyncio
+    async def test_own_superseded_decision_returns_successor(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            voter = await _make_principal(session, ["technical-director"], display_name="V")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+            original = await _cast_decision(
+                session, request, voter, "reject", ["technical-director"]
+            )
+            successor = await _cast_decision(
+                session,
+                request,
+                voter,
+                "approve",
+                ["technical-director"],
+                supersedes_decision_id=original.id,
+            )
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(voter, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is not None
+        assert detail.current_principal_decision.decision_id == successor.id
+        assert detail.current_principal_decision.decision == "approve"
+
+    @pytest.mark.asyncio
+    async def test_other_principal_decision_never_returned_as_caller_own(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            voter = await _make_principal(session, ["technical-director"], display_name="V")
+            other = await _make_principal(session, ["qa-reviewer"], display_name="Other")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+            await _cast_decision(session, request, voter, "approve", ["technical-director"])
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(other, ["qa-reviewer"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is None

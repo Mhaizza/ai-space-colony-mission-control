@@ -26,7 +26,12 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.time import utcnow
 from app.db.pagination import paginate
 from app.mission.approval_evaluator import EffectiveDecision, evaluate_approval
-from app.mission.approval_service import effective_decisions, validate_policy_definition
+from app.mission.approval_service import (
+    can_principal_decide,
+    effective_decisions,
+    validate_policy_definition,
+)
+from app.mission.principal_resolver import ResolvedPrincipal
 from app.models.mc_approval import (
     McApprovalEvent,
     McApprovalPolicy,
@@ -35,6 +40,7 @@ from app.models.mc_approval import (
 from app.schemas.mission_approvals import (
     ApprovalDetailResponse,
     ApprovalListItem,
+    CurrentPrincipalDecisionView,
     EffectiveDecisionView,
     LifecycleEventView,
     QuorumRequirementView,
@@ -109,9 +115,19 @@ async def list_approvals(
 
 
 async def get_approval_detail(
-    session: AsyncSession, request_id: UUID
+    session: AsyncSession, request_id: UUID, *, principal: ResolvedPrincipal
 ) -> ApprovalDetailResponse | None:
-    """Return the full backend-derived detail view for one request, or `None` if not found."""
+    """Return the full backend-derived detail view for one request, or `None` if not found.
+
+    `principal` is the already-resolved, authenticated caller (resolved by
+    the route from server-verified `AuthContext` via `resolve_principal`,
+    never from client input). It drives two caller-specific fields:
+    `can_decide` (via the shared `can_principal_decide` eligibility check --
+    never a second/independent algorithm) and `current_principal_decision`
+    (the caller's own entry in the same supersession-aware
+    `effective_decisions()` list the write path uses, never a separately
+    reconstructed chain).
+    """
     request = await session.get(McApprovalRequest, request_id)
     if request is None:
         return None
@@ -152,6 +168,18 @@ async def get_approval_detail(
         )
     ).all()
 
+    own_decision = next((d for d in decisions if d.principal_id == principal.id), None)
+    current_principal_decision = (
+        CurrentPrincipalDecisionView(
+            decision_id=own_decision.id,
+            decision=own_decision.decision,
+            reason=own_decision.reason,
+            created_at=own_decision.created_at,
+        )
+        if own_decision is not None
+        else None
+    )
+
     return ApprovalDetailResponse(
         request_id=request.id,
         status=request.status,
@@ -188,4 +216,8 @@ async def get_approval_detail(
         expires_at=request.expires_at,
         resolved_at=request.resolved_at,
         mission_effect=evaluation.mission_effect,
+        can_decide=can_principal_decide(
+            principal=principal, request=request, definition=definition
+        ),
+        current_principal_decision=current_principal_decision,
     )
