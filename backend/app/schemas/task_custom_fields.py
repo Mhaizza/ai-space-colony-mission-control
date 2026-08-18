@@ -311,9 +311,7 @@ def _validate_regex_safety(pattern: str) -> None:
     # Reject common ReDoS-prone constructs like grouped expressions followed by
     # quantifiers where the group body itself contains quantifiers.
     if re.search(r"\((?:[^()\\]|\\.)*[+*](?:[^()\\]|\\.)*\)[+*{]", pattern):
-        raise ValueError(
-            "validation_regex contains unsafe nested quantifiers"
-        )
+        raise ValueError("validation_regex contains unsafe nested quantifiers")
 
 
 @lru_cache(maxsize=256)
