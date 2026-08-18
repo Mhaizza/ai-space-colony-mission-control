@@ -36,14 +36,18 @@ from app.models.mc_approval import (
 )
 
 
-def _resolved(principal: McPrincipal, roles: list[str]) -> ResolvedPrincipal:
+def _resolved(
+    principal: McPrincipal, roles: list[str], *, principal_type: str | None = None
+) -> ResolvedPrincipal:
     """Build the `ResolvedPrincipal` value object `get_approval_detail` expects,
     from a seeded `McPrincipal` row plus the roles already granted to it --
     mirrors what `resolve_principal()` would return for this identity,
-    without a second DB round trip."""
+    without a second DB round trip. `principal_type` defaults to the row's
+    own value but can be overridden to exercise a specific resolved
+    principal_type independent of how the row happens to be seeded."""
     return ResolvedPrincipal(
         id=principal.id,
-        principal_type=principal.principal_type,
+        principal_type=principal_type if principal_type is not None else principal.principal_type,
         display_name=principal.display_name,
         trust_level=principal.trust_level,
         enabled=principal.enabled,
@@ -458,6 +462,18 @@ TRUST_GATED_POLICY: dict[str, object] = {
 }
 
 
+NON_HUMAN_ALLOWED_POLICY: dict[str, object] = {
+    **TWO_SLOT_POLICY,
+    # Deliberately permits "system" too, so `_authorize_decision()` alone
+    # would pass for a system principal holding an eligible role -- this
+    # is what makes the regression test below a genuine proof that
+    # `can_principal_decide()` must apply the same manual-human gate the
+    # mutation path applies via `_require_human_manual_actor()`, not just
+    # `_authorize_decision()`.
+    "allowed_approver_principal_types": ["human", "system"],
+}
+
+
 class TestCallerAwareCapability:
     """`can_decide` and `current_principal_decision` (Checkpoint A3): both
     must be caller-specific and derived from the same eligibility/
@@ -476,6 +492,37 @@ class TestCallerAwareCapability:
             )
         assert detail is not None
         assert detail.can_decide is True
+
+    @pytest.mark.asyncio
+    async def test_non_human_principal_can_decide_false_even_if_authorize_decision_would_pass(
+        self,
+    ) -> None:
+        """Regression: a resolved non-human (system) principal whose role
+        would otherwise satisfy `_authorize_decision()` must still get
+        `can_decide=False` -- the manual mutation path additionally gates on
+        `_require_human_manual_actor()` before ever reaching
+        `_authorize_decision()`, and `can_principal_decide()` must apply the
+        exact same gate, not a narrower one."""
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            system_principal = await _make_principal(
+                session,
+                ["technical-director"],
+                display_name="System Actor",
+                principal_type="system",
+            )
+            policy = await _make_policy(session, NON_HUMAN_ALLOWED_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session,
+                request.id,
+                principal=_resolved(
+                    system_principal, ["technical-director"], principal_type="system"
+                ),
+            )
+        assert detail is not None
+        assert detail.can_decide is False
 
     @pytest.mark.asyncio
     async def test_ineligible_role_can_decide_false(self) -> None:
