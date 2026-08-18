@@ -40,6 +40,7 @@ from app.mission.approval_service import (
     supersede_decision,
 )
 from app.mission.principal_resolver import PrincipalResolutionError
+from app.schemas.mission import MissionCardKind
 from app.schemas.mission_approvals import (
     ApprovalDecisionResponse,
     ApprovalDetailResponse,
@@ -50,6 +51,17 @@ from app.schemas.mission_approvals import (
     SupersedeDecisionRequest,
 )
 from app.schemas.pagination import DefaultLimitOffsetPage
+
+_PARTIAL_MISSION_FILTER_TUPLE = HTTPException(
+    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+    detail={
+        "code": "partial_mission_filter_tuple",
+        "message": (
+            "mission_source_repo, mission_card_kind, and mission_card_number "
+            "must be supplied together or not at all"
+        ),
+    },
+)
 
 router = APIRouter(prefix="/mission/approvals", tags=["mission-approvals"])
 AUTH_DEP = Depends(require_user_auth)
@@ -82,10 +94,27 @@ def _require_idempotency_key(idempotency_key: str) -> str:
 async def list_approvals(
     auth: AuthContext = AUTH_DEP,
     session: AsyncSession = SESSION_DEP,
+    mission_source_repo: str | None = None,
+    mission_card_kind: MissionCardKind | None = None,
+    mission_card_number: int | None = None,
 ) -> DefaultLimitOffsetPage[ApprovalListItem]:
-    """Return a paginated list of approval requests."""
+    """Return a paginated list of approval requests.
+
+    Either all three Mission filters are supplied (exact Mission-identity
+    filtering, applied in SQL before pagination) or none are (existing
+    backward-compatible global list). A partial tuple is rejected with 422
+    before the service layer is ever called.
+    """
     _ = auth
-    return await approval_read_service.list_approvals(session)
+    parts = (mission_source_repo, mission_card_kind, mission_card_number)
+    if any(part is not None for part in parts) and not all(part is not None for part in parts):
+        raise _PARTIAL_MISSION_FILTER_TUPLE
+    return await approval_read_service.list_approvals(
+        session,
+        mission_source_repo=mission_source_repo,
+        mission_card_kind=mission_card_kind,
+        mission_card_number=mission_card_number,
+    )
 
 
 @router.get(

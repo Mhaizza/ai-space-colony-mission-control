@@ -482,3 +482,113 @@ class TestReadApi:
             response = await client.get(f"/api/v1/mission/approvals/{uuid4()}")
         assert response.status_code == 404
         assert response.json()["detail"]["code"] == "approval_request_not_found"
+
+
+class TestMissionScopedListFiltersApi:
+    """Query-parameter contract for the Mission filter tuple on the existing
+    `GET /mission/approvals` route: all-or-nothing, typed validation."""
+
+    @pytest.mark.asyncio
+    async def test_no_filters_returns_200(self, maker: async_sessionmaker[AsyncSession]) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_policy(maker)
+        app = _build_app(maker, auth=_auth_for("creator"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await client.post(
+                "/api/v1/mission/approvals", json=CREATE_BODY, headers={"Idempotency-Key": "k1"}
+            )
+            response = await client.get("/api/v1/mission/approvals")
+        assert response.status_code == 200
+
+    @pytest.mark.asyncio
+    async def test_all_three_filters_returns_200_and_exact_match(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_policy(maker)
+        app = _build_app(maker, auth=_auth_for("creator"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            await client.post(
+                "/api/v1/mission/approvals", json=CREATE_BODY, headers={"Idempotency-Key": "k1"}
+            )
+            different_repo = {**CREATE_BODY, "mission_source_repo": "Mhaizza/ai-space-colony-sim"}
+            await client.post(
+                "/api/v1/mission/approvals",
+                json=different_repo,
+                headers={"Idempotency-Key": "k2"},
+            )
+            response = await client.get(
+                "/api/v1/mission/approvals",
+                params={
+                    "mission_source_repo": CREATE_BODY["mission_source_repo"],
+                    "mission_card_kind": CREATE_BODY["mission_card_kind"],
+                    "mission_card_number": CREATE_BODY["mission_card_number"],
+                },
+            )
+        assert response.status_code == 200
+        body = response.json()
+        assert body["total"] == 1
+        assert body["items"][0]["mission_source_repo"] == CREATE_BODY["mission_source_repo"]
+
+    @pytest.mark.asyncio
+    async def test_repo_only_returns_422(self, maker: async_sessionmaker[AsyncSession]) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        app = _build_app(maker, auth=_auth_for("creator"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/mission/approvals",
+                params={"mission_source_repo": "Mhaizza/ai-space-colony-sim"},
+            )
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_repo_and_kind_only_returns_422(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        app = _build_app(maker, auth=_auth_for("creator"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/mission/approvals",
+                params={
+                    "mission_source_repo": "Mhaizza/ai-space-colony-sim",
+                    "mission_card_kind": "issue",
+                },
+            )
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_kind_and_number_only_returns_422(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        app = _build_app(maker, auth=_auth_for("creator"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/mission/approvals",
+                params={"mission_card_kind": "issue", "mission_card_number": 16},
+            )
+        assert response.status_code == 422
+
+    @pytest.mark.asyncio
+    async def test_invalid_mission_card_kind_fails_typed_validation(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        app = _build_app(maker, auth=_auth_for("creator"))
+
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            response = await client.get(
+                "/api/v1/mission/approvals",
+                params={
+                    "mission_source_repo": "Mhaizza/ai-space-colony-sim",
+                    "mission_card_kind": "not-a-real-kind",
+                    "mission_card_number": 16,
+                },
+            )
+        assert response.status_code == 422

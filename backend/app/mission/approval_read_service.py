@@ -42,13 +42,36 @@ from app.schemas.mission_approvals import (
 from app.schemas.pagination import DefaultLimitOffsetPage
 
 
-async def list_approvals(session: AsyncSession) -> DefaultLimitOffsetPage[ApprovalListItem]:
-    """Return a paginated list of approval requests, newest first."""
+async def list_approvals(
+    session: AsyncSession,
+    *,
+    mission_source_repo: str | None = None,
+    mission_card_kind: str | None = None,
+    mission_card_number: int | None = None,
+) -> DefaultLimitOffsetPage[ApprovalListItem]:
+    """Return a paginated list of approval requests, newest first.
+
+    When all three Mission filters are supplied, they are applied as SQL
+    `WHERE` predicates before `paginate()` runs -- never as a Python-side
+    filter over an already-paginated page. Callers must supply either all
+    three filters or none (partial tuples are rejected at the API layer
+    before this function is ever called).
+    """
     statement = (
         select(McApprovalRequest, McApprovalPolicy)
         .join(McApprovalPolicy, col(McApprovalRequest.policy_id) == col(McApprovalPolicy.id))
-        .order_by(col(McApprovalRequest.created_at).desc())
     )
+    if (
+        mission_source_repo is not None
+        and mission_card_kind is not None
+        and mission_card_number is not None
+    ):
+        statement = statement.where(
+            col(McApprovalRequest.mission_source_repo) == mission_source_repo,
+            col(McApprovalRequest.mission_card_kind) == mission_card_kind,
+            col(McApprovalRequest.mission_card_number) == mission_card_number,
+        )
+    statement = statement.order_by(col(McApprovalRequest.created_at).desc())
 
     def _transform(rows: Sequence[object]) -> Sequence[ApprovalListItem]:
         items: list[ApprovalListItem] = []

@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import pytest
+from fastapi_pagination.api import set_params
+from fastapi_pagination.limit_offset import LimitOffsetParams
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
@@ -23,7 +25,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.time import utcnow
 from app.mission.approval_evaluator import EffectiveDecision, evaluate_approval
 from app.mission.approval_policy import ApprovalPolicyDefinition
-from app.mission.approval_read_service import get_approval_detail
+from app.mission.approval_read_service import get_approval_detail, list_approvals
 from app.models.mc_approval import (
     McApprovalDecision,
     McApprovalPolicy,
@@ -94,19 +96,24 @@ async def _make_policy(session: AsyncSession, definition: dict[str, object]) -> 
 
 
 async def _make_request(
-    session: AsyncSession, policy: McApprovalPolicy, creator: McPrincipal
+    session: AsyncSession,
+    policy: McApprovalPolicy,
+    creator: McPrincipal,
+    **overrides: object,
 ) -> McApprovalRequest:
-    request = McApprovalRequest(
-        policy_id=policy.id,
-        scope_type="action",
-        mission_source_repo="Mhaizza/ai-space-colony-mission-control",
-        mission_card_kind="issue",
-        mission_card_number=16,
-        created_by_principal_id=creator.id,
-        creation_source="human",
-        status="pending",
-        created_at=utcnow(),
-    )
+    defaults: dict[str, object] = {
+        "policy_id": policy.id,
+        "scope_type": "action",
+        "mission_source_repo": "Mhaizza/ai-space-colony-mission-control",
+        "mission_card_kind": "issue",
+        "mission_card_number": 16,
+        "created_by_principal_id": creator.id,
+        "creation_source": "human",
+        "status": "pending",
+        "created_at": utcnow(),
+    }
+    defaults.update(overrides)
+    request = McApprovalRequest(**defaults)  # type: ignore[arg-type]
     session.add(request)
     await session.commit()
     await session.refresh(request)
@@ -290,3 +297,123 @@ class TestQuorumRequirementsShape:
         async with _engine_and_session() as session:
             detail = await get_approval_detail(session, uuid4())
         assert detail is None
+
+
+class TestMissionScopedListFilters:
+    """Mission filters must be applied in SQL before pagination -- not by
+    fetching a global page and filtering client-side."""
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_list_remains_backward_compatible(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-sim",
+                mission_card_kind="issue",
+                mission_card_number=1,
+            )
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                mission_card_kind="pull_request",
+                mission_card_number=172,
+            )
+
+            with set_params(LimitOffsetParams(limit=100, offset=0)):
+                page = await list_approvals(session)
+        assert page.total == 2
+
+    @pytest.mark.asyncio
+    async def test_exact_identity_filter_returns_only_matching_rows(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            target = await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                mission_card_kind="pull_request",
+                mission_card_number=172,
+            )
+            # Same repo, different kind/number -- must not match.
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                mission_card_kind="pull_request",
+                mission_card_number=173,
+            )
+            # Same kind/number, different repo -- must not match.
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-sim",
+                mission_card_kind="pull_request",
+                mission_card_number=172,
+            )
+
+            with set_params(LimitOffsetParams(limit=100, offset=0)):
+                page = await list_approvals(
+                    session,
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=172,
+                )
+        assert page.total == 1
+        assert page.items[0].request_id == target.id
+
+    @pytest.mark.asyncio
+    async def test_filtering_happens_before_pagination(self) -> None:
+        """Seed more matching rows than exist of the non-matching identity,
+        and more non-matching rows than the page limit, to prove the SQL
+        WHERE clause -- not a Python-side filter after pagination -- is what
+        selects the matching set. If filtering happened after pagination on
+        a small page, this would undercount or return non-matching rows."""
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            for _ in range(3):
+                await _make_request(
+                    session,
+                    policy,
+                    creator,
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=172,
+                )
+            for i in range(5):
+                await _make_request(
+                    session,
+                    policy,
+                    creator,
+                    mission_source_repo="Mhaizza/ai-space-colony-sim",
+                    mission_card_kind="issue",
+                    mission_card_number=i,
+                )
+
+            # limit=3: if filtering happened in Python *after* pagination
+            # instead of in SQL *before* it, this page would return
+            # (some of) the 5 non-matching rows -- the newest-first global
+            # order puts the later-inserted non-matching rows first.
+            with set_params(LimitOffsetParams(limit=3, offset=0)):
+                page = await list_approvals(
+                    session,
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=172,
+                )
+        assert page.total == 3
+        assert len(page.items) == 3
+        assert all(
+            item.mission_source_repo == "Mhaizza/ai-space-colony-mission-control"
+            for item in page.items
+        )
