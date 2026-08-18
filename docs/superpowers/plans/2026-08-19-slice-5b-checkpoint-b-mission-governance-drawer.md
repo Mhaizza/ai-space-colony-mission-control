@@ -351,15 +351,20 @@ export function ApprovalDetailPane({ selectedApprovalRequestId }: { selectedAppr
 
 ---
 
-### Task 8 — Mission-switch integration behavior
+### Task 8 — Mission-switch and detail-error integration behavior
 
-**Goal:** Prove, at the `MissionGovernanceDrawer` integration level (real `ApprovalListPane`/`ApprovalDetailPane`, mocked generated hooks), that switching the selected Mission card resets the approval selection, keeps the drawer open, and re-fetches for the new identity — with no stale data crossing over. This is the plan's answer to the spec-review's non-blocking observation: **"drawer stays open during Mission switch" is made an explicit, standalone assertion here**, not left implicit.
+**Goal:** Prove, at the `MissionGovernanceDrawer` integration level (real `ApprovalListPane`/`ApprovalDetailPane`, mocked generated hooks), two cross-component invariants that no single pane's isolated unit test can establish on its own, because the properties involved are owned by, or span, more than one component:
+
+- **Scenario A — Mission switch:** switching the selected Mission card resets the approval selection, keeps the drawer open, and re-fetches for the new identity, with no stale data crossing over. This is the plan's answer to the spec-review's non-blocking observation: **"drawer stays open during Mission switch" is made an explicit, standalone assertion here**, not left implicit.
+- **Scenario B — Detail-error isolation:** when a selected approval's detail fetch fails, the sibling `ApprovalListPane` (list visibility, selected-row marker) and the parent-owned `selectedApprovalRequestId`/`selectedMissionCard` state all persist unchanged. Task 6's own unit test of `ApprovalDetailPane` in isolation cannot prove this — that test's render tree contains no list pane at all, and `selectedApprovalRequestId` is owned by `MissionGovernanceDrawer` (Task 3), not by the detail pane itself — so this is proven here instead, at the level where the state and the sibling component actually live.
 
 **Files:**
 - Modify: `frontend/src/components/mission/governance/MissionGovernanceDrawer.tsx` (wire real panes in place of Task 3's stubs, if not already done incidentally by Tasks 4–7's own component wiring — verify and adjust import wiring only, no new behavior)
 - Test: `frontend/src/components/mission/governance/MissionGovernanceDrawer.test.tsx` (extend)
 
 **Test to write FIRST:**
+
+*Scenario A — Mission switch:*
 1. Render the drawer for Mission A; mock the list hook to return one item; select that item (assert detail hook is called with its `request_id`).
 2. Re-render the same drawer instance with Mission B's `card` prop (simulating the parent page updating `selectedMissionCard`).
 3. Assert, all in the same test:
@@ -368,15 +373,27 @@ export function ApprovalDetailPane({ selectedApprovalRequestId }: { selectedAppr
    - the detail hook is now called with `enabled: false` (no `request_id` carried over from Mission A) — i.e. `selectedApprovalRequestId` was reset to `null`;
    - the detail pane renders the placeholder text `Select an approval to view details` again.
 
-**Expected RED:** if Task 3's reset wiring has any gap (e.g. reset only fires on `source_repo` change but not `kind`/`number` change, or a stale query result renders before the new one resolves), this test catches it; if Tasks 3–7 were implemented correctly this task may already be GREEN on first run — still write and run it explicitly rather than assuming.
+*Scenario B — Detail-error isolation (addresses checklist items 10 "detail error does not remove list" and 11 "detail Retry preserves selection"):*
+1. Render the drawer for one Mission card; mock the list hook to return at least two items (e.g. `request_id: "req-1"` and `"req-2"`); select `"req-1"` (the row using the plan's existing selected-state marker from Task 5, `aria-current="true"`) and mock the detail hook to return `isError: true, error: new Error("boom"), refetch: <spy>` for that `request_id`.
+2. Assert, before any retry:
+   - every list row from step 1 is still rendered (the list did **not** disappear or get replaced by the detail error UI — list and detail are separate DOM regions, so both are present simultaneously);
+   - the row for `"req-1"` still carries `aria-current="true"` (the selected-row marker is unchanged by the sibling's error state);
+   - the detail pane shows its localized error message and a `Retry` control.
+3. Click `Retry`. Assert:
+   - the mocked detail `refetch` spy was called;
+   - the detail hook's most recent call is still for `requestId === "req-1"` (same request id — not cleared, not swapped);
+   - the list rows are still all present and `"req-1"`'s row is still `aria-current="true"` (selection was not cleared by the error+Retry cycle);
+   - the drawer header's Mission identity text (`source_repo`/`kind`/`#number`/`title`) is unchanged from step 1 (Mission selection was not touched by a detail-only failure).
 
-**Minimal implementation:** none anticipated beyond what Tasks 3–7 already built; if RED, fix the gap identified by the failing assertion (most likely the reset dependency array in Task 3).
+**Expected RED:** For Scenario A: if Task 3's reset wiring has any gap (e.g. reset only fires on `source_repo` change but not `kind`/`number` change, or a stale query result renders before the new one resolves), this test catches it. For Scenario B: if `MissionGovernanceDrawer` (or either pane) has any code path that clears `selectedApprovalRequestId` on a detail-query error, or that unmounts/hides the list pane when the detail pane errors, this test catches it. If Tasks 3–7 were implemented correctly per this plan (no such clearing/unmounting code path is proposed anywhere in Tasks 1–7), both scenarios may already be GREEN on first run — still write and run them explicitly rather than assuming.
+
+**Minimal implementation:** none anticipated beyond what Tasks 3–7 already built; if RED, fix the gap identified by the failing assertion (most likely the reset dependency array in Task 3 for Scenario A, or an unintended state/visibility coupling introduced in Task 3/4/6 for Scenario B).
 
 **Validation:** `cd frontend && npx vitest run src/components/mission/governance/MissionGovernanceDrawer.test.tsx && npx tsc -p tsconfig.json --noEmit`
 
-**Expected GREEN:** all four integration assertions pass.
+**Expected GREEN:** all Scenario A assertions and all Scenario B assertions pass.
 
-**Commit boundary:** `test(slice5b): checkpoint B task 8 — mission switch reset integration test` (or folded into Task 3's commit if no code change was needed — state explicitly in the commit message which case applied).
+**Commit boundary:** `test(slice5b): checkpoint B task 8 — mission switch and detail-error integration tests` (or folded into Task 3's commit if no code change was needed for either scenario — state explicitly in the commit message which case(s) applied).
 
 ---
 
@@ -486,12 +503,13 @@ Also run, from repo root, whatever `make check` / documented canonical CI-equiva
 - List ordering (pending-first, newest-within-group) + row selection: Task 1 + Task 5.
 - Detail placeholder/loading/error+Retry + exact-id fetch/enabled gating: Task 6.
 - Full backend-authoritative detail rendering + terminal read-only badge + caller-aware fields as plain data: Task 1 + Task 7.
-- Mission-switch integration (drawer stays open, explicit standalone assertion): Task 8.
+- Mission-switch integration (drawer stays open, explicit standalone assertion): Task 8 Scenario A.
+- Detail-error cross-component isolation (list stays visible, selected row and selection state persist through error+Retry): Task 8 Scenario B.
 - Narrow drill-in + Back: Task 9.
 - Zero-mutation scope guard + legacy Board regression: Task 10.
 - Repository-wide validation: Task 11.
 
-Every numbered test item (1–20) from the human brief's "TEST PLAN" section maps to at least one task above (1↔Task 2, 2↔Task 4, 3↔Task 8, 4↔Task 8, 5↔Task 5, 6↔Task 5, 7↔Task 4, 8↔Task 4, 9↔Task 6, 10↔Task 6, 11↔Task 7, 12↔Task 9, 13↔Task 9, 14↔Task 9, 15↔Task 9, 16–18↔Task 7/Task 10, 19↔Task 10, 20↔Task 10).
+Every numbered test item (1–20) from the human brief's "TEST PLAN" section maps to at least one task above (1↔Task 2, 2↔Task 4, 3↔Task 8 Scenario A, 4↔Task 8 Scenario A, 5↔Task 5, 6↔Task 5, 7↔Task 4, 8↔Task 4, 9↔Task 6, 10↔Task 8 Scenario B, 11↔Task 8 Scenario B, 12↔Task 7, 13↔Task 9, 14↔Task 9, 15↔Task 9, 16–18↔Task 7/Task 10, 19↔Task 10, 20↔Task 10). Items 10 ("detail error does not remove list") and 11 ("detail Retry preserves selection") were previously mis-mapped to Task 6 in an earlier revision of this plan — Task 6's unit test proves `ApprovalDetailPane` itself has no clearing side-effect, which is necessary but not sufficient, since the list's visibility and the `selectedApprovalRequestId` state it must not clear both live outside that pane. Task 8 Scenario B now provides the actual integration-level proof for both items.
 
 ### Mutation leakage
 
