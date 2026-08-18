@@ -11,7 +11,7 @@ import type { MissionQuarantineReasonCount } from "./missionQuarantineReasonCoun
  * Quarantine totals, per-reason breakdown, and a recent-entry window.
  */
 export interface MissionQuarantineSummary {
+  total: number;
   by_reason: MissionQuarantineReasonCount[];
   recent: MissionQuarantineEntry[];
-  total: number;
 }

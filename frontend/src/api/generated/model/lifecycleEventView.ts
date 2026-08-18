@@ -10,8 +10,8 @@ import type { LifecycleEventViewDetail } from "./lifecycleEventViewDetail";
  * One lifecycle event on a request, for the detail read model.
  */
 export interface LifecycleEventView {
-  created_at: string;
-  detail: LifecycleEventViewDetail;
   event_type: string;
   triggered_by_principal_id: string | null;
+  detail: LifecycleEventViewDetail;
+  created_at: string;
 }

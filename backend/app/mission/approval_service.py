@@ -359,6 +359,46 @@ def _authorize_decision(principal: ResolvedPrincipal, definition: ApprovalPolicy
         )
 
 
+def can_principal_decide(
+    *,
+    principal: ResolvedPrincipal,
+    request: McApprovalRequest,
+    definition: ApprovalPolicyDefinition,
+) -> bool:
+    """Shared read/write decision-eligibility signal (Slice 5B Checkpoint A).
+
+    This is the *only* place `can_decide` is computed: it directly reuses
+    `_require_human_manual_actor` and `_authorize_decision` -- the exact two
+    checks `submit_decision` and `supersede_decision` both call, in the same
+    order, before writing -- plus the same request-pending gate those two
+    functions apply before authorizing at all. No second/independent
+    eligibility algorithm exists anywhere in `approval_read_service.py`.
+
+    `_require_human_manual_actor` must run here too, not just
+    `_authorize_decision`: a policy may list `"system"` in
+    `allowed_approver_principal_types` (e.g. for Checkpoint E's system
+    trigger path), which `_authorize_decision` alone would accept, but the
+    *manual* mutation path this read-only signal mirrors unconditionally
+    rejects any non-human principal via `_require_human_manual_actor` before
+    it ever reaches `_authorize_decision`. Skipping that gate here would let
+    a resolved system/ai principal see `can_decide=True` for a decision the
+    mutation route would reject with `principal_not_human`.
+
+    This is a UX capability signal only. Every mutation command still calls
+    `_require_human_manual_actor` and `_authorize_decision` (and re-checks
+    `request.status`) itself at command time under its own row lock; a
+    `True` result here is never treated as authorization by any write path.
+    """
+    if request.status != "pending":
+        return False
+    try:
+        _require_human_manual_actor(principal)
+        _authorize_decision(principal, definition)
+    except ApprovalServiceError:
+        return False
+    return True
+
+
 async def effective_decisions(session: AsyncSession, request_id: UUID) -> list[McApprovalDecision]:
     all_decisions = (
         await session.exec(

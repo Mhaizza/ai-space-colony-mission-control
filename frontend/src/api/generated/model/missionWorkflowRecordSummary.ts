@@ -12,13 +12,13 @@ Parsing is read-only and payload-local (Slice 3.5 keeps workflow views
 minimal): assignment authority derivation is intentionally excluded.
  */
 export interface MissionWorkflowRecordSummary {
-  author: string | null;
-  card: number | null;
   comment_source_id: string;
-  parsed_ok: boolean;
+  card: number | null;
   record_type: string | null;
-  role: string | null;
-  updated_at: string | null;
-  url: string | null;
   worker: string | null;
+  role: string | null;
+  author: string | null;
+  url: string | null;
+  updated_at: string | null;
+  parsed_ok: boolean;
 }

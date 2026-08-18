@@ -15,6 +15,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime
 
 import pytest
+from fastapi_pagination.api import set_params
+from fastapi_pagination.limit_offset import LimitOffsetParams
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlalchemy.pool import StaticPool
 from sqlmodel import SQLModel
@@ -23,7 +25,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.time import utcnow
 from app.mission.approval_evaluator import EffectiveDecision, evaluate_approval
 from app.mission.approval_policy import ApprovalPolicyDefinition
-from app.mission.approval_read_service import get_approval_detail
+from app.mission.approval_read_service import get_approval_detail, list_approvals
+from app.mission.principal_resolver import ResolvedPrincipal
 from app.models.mc_approval import (
     McApprovalDecision,
     McApprovalPolicy,
@@ -31,6 +34,25 @@ from app.models.mc_approval import (
     McApprovalRequest,
     McPrincipal,
 )
+
+
+def _resolved(
+    principal: McPrincipal, roles: list[str], *, principal_type: str | None = None
+) -> ResolvedPrincipal:
+    """Build the `ResolvedPrincipal` value object `get_approval_detail` expects,
+    from a seeded `McPrincipal` row plus the roles already granted to it --
+    mirrors what `resolve_principal()` would return for this identity,
+    without a second DB round trip. `principal_type` defaults to the row's
+    own value but can be overridden to exercise a specific resolved
+    principal_type independent of how the row happens to be seeded."""
+    return ResolvedPrincipal(
+        id=principal.id,
+        principal_type=principal_type if principal_type is not None else principal.principal_type,
+        display_name=principal.display_name,
+        trust_level=principal.trust_level,
+        enabled=principal.enabled,
+        role_slugs=frozenset(roles),
+    )
 
 
 @asynccontextmanager
@@ -94,19 +116,24 @@ async def _make_policy(session: AsyncSession, definition: dict[str, object]) -> 
 
 
 async def _make_request(
-    session: AsyncSession, policy: McApprovalPolicy, creator: McPrincipal
+    session: AsyncSession,
+    policy: McApprovalPolicy,
+    creator: McPrincipal,
+    **overrides: object,
 ) -> McApprovalRequest:
-    request = McApprovalRequest(
-        policy_id=policy.id,
-        scope_type="action",
-        mission_source_repo="Mhaizza/ai-space-colony-mission-control",
-        mission_card_kind="issue",
-        mission_card_number=16,
-        created_by_principal_id=creator.id,
-        creation_source="human",
-        status="pending",
-        created_at=utcnow(),
-    )
+    defaults: dict[str, object] = {
+        "policy_id": policy.id,
+        "scope_type": "action",
+        "mission_source_repo": "Mhaizza/ai-space-colony-mission-control",
+        "mission_card_kind": "issue",
+        "mission_card_number": 16,
+        "created_by_principal_id": creator.id,
+        "creation_source": "human",
+        "status": "pending",
+        "created_at": utcnow(),
+    }
+    defaults.update(overrides)
+    request = McApprovalRequest(**defaults)  # type: ignore[arg-type]
     session.add(request)
     await session.commit()
     await session.refresh(request)
@@ -119,17 +146,23 @@ async def _cast_decision(
     principal: McPrincipal,
     decision: str,
     roles: list[str],
+    *,
+    reason: str | None = None,
+    supersedes_decision_id: object = None,
 ) -> McApprovalDecision:
     row = McApprovalDecision(
         request_id=request.id,
         principal_id=principal.id,
         decision=decision,
+        reason=reason,
         role_slugs_at_decision=roles,
         trust_level_at_decision="standard",
         created_at=utcnow(),
+        supersedes_decision_id=supersedes_decision_id,
     )
     session.add(row)
     await session.commit()
+    await session.refresh(row)
     return row
 
 
@@ -174,7 +207,9 @@ class TestQuorumRequirementsShape:
             policy = await _make_policy(session, TWO_SLOT_POLICY)
             request = await _make_request(session, policy, creator)
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
             assert {q.slot for q in detail.quorum_requirements} == {"a", "b"}
             by_slot = {q.slot: q for q in detail.quorum_requirements}
@@ -190,7 +225,9 @@ class TestQuorumRequirementsShape:
             request = await _make_request(session, policy, creator)
             await _cast_decision(session, request, voter_a, "approve", ["technical-director"])
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
 
             definition = ApprovalPolicyDefinition.model_validate(TWO_SLOT_POLICY)
@@ -227,7 +264,9 @@ class TestQuorumRequirementsShape:
             )
             await _cast_decision(session, request, qa_only, "approve", ["qa-reviewer"])
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
 
             definition = ApprovalPolicyDefinition.model_validate(MULTI_ROLE_POLICY)
@@ -269,7 +308,9 @@ class TestQuorumRequirementsShape:
             request = await _make_request(session, policy, creator)
             await _cast_decision(session, request, voter_a, "approve", ["technical-director"])
 
-            detail = await get_approval_detail(session, request.id)
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
             assert detail is not None
 
             # Every slot exposes eligible_roles (who can still approve).
@@ -288,5 +329,313 @@ class TestQuorumRequirementsShape:
         from uuid import uuid4
 
         async with _engine_and_session() as session:
-            detail = await get_approval_detail(session, uuid4())
+            creator = await _make_principal(session, ["technical-director"])
+            detail = await get_approval_detail(
+                session, uuid4(), principal=_resolved(creator, ["technical-director"])
+            )
         assert detail is None
+
+
+class TestMissionScopedListFilters:
+    """Mission filters must be applied in SQL before pagination -- not by
+    fetching a global page and filtering client-side."""
+
+    @pytest.mark.asyncio
+    async def test_unfiltered_list_remains_backward_compatible(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-sim",
+                mission_card_kind="issue",
+                mission_card_number=1,
+            )
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                mission_card_kind="pull_request",
+                mission_card_number=172,
+            )
+
+            with set_params(LimitOffsetParams(limit=100, offset=0)):
+                page = await list_approvals(session)
+        assert page.total == 2
+
+    @pytest.mark.asyncio
+    async def test_exact_identity_filter_returns_only_matching_rows(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            target = await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                mission_card_kind="pull_request",
+                mission_card_number=172,
+            )
+            # Same repo, different kind/number -- must not match.
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                mission_card_kind="pull_request",
+                mission_card_number=173,
+            )
+            # Same kind/number, different repo -- must not match.
+            await _make_request(
+                session,
+                policy,
+                creator,
+                mission_source_repo="Mhaizza/ai-space-colony-sim",
+                mission_card_kind="pull_request",
+                mission_card_number=172,
+            )
+
+            with set_params(LimitOffsetParams(limit=100, offset=0)):
+                page = await list_approvals(
+                    session,
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=172,
+                )
+        assert page.total == 1
+        assert page.items[0].request_id == target.id
+
+    @pytest.mark.asyncio
+    async def test_filtering_happens_before_pagination(self) -> None:
+        """Seed more matching rows than exist of the non-matching identity,
+        and more non-matching rows than the page limit, to prove the SQL
+        WHERE clause -- not a Python-side filter after pagination -- is what
+        selects the matching set. If filtering happened after pagination on
+        a small page, this would undercount or return non-matching rows."""
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            for _ in range(3):
+                await _make_request(
+                    session,
+                    policy,
+                    creator,
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=172,
+                )
+            for i in range(5):
+                await _make_request(
+                    session,
+                    policy,
+                    creator,
+                    mission_source_repo="Mhaizza/ai-space-colony-sim",
+                    mission_card_kind="issue",
+                    mission_card_number=i,
+                )
+
+            # limit=3: if filtering happened in Python *after* pagination
+            # instead of in SQL *before* it, this page would return
+            # (some of) the 5 non-matching rows -- the newest-first global
+            # order puts the later-inserted non-matching rows first.
+            with set_params(LimitOffsetParams(limit=3, offset=0)):
+                page = await list_approvals(
+                    session,
+                    mission_source_repo="Mhaizza/ai-space-colony-mission-control",
+                    mission_card_kind="pull_request",
+                    mission_card_number=172,
+                )
+        assert page.total == 3
+        assert len(page.items) == 3
+        assert all(
+            item.mission_source_repo == "Mhaizza/ai-space-colony-mission-control"
+            for item in page.items
+        )
+
+
+TRUST_GATED_POLICY: dict[str, object] = {
+    **TWO_SLOT_POLICY,
+    "trust_requirements": ["trusted"],
+}
+
+
+NON_HUMAN_ALLOWED_POLICY: dict[str, object] = {
+    **TWO_SLOT_POLICY,
+    # Deliberately permits "system" too, so `_authorize_decision()` alone
+    # would pass for a system principal holding an eligible role -- this
+    # is what makes the regression test below a genuine proof that
+    # `can_principal_decide()` must apply the same manual-human gate the
+    # mutation path applies via `_require_human_manual_actor()`, not just
+    # `_authorize_decision()`.
+    "allowed_approver_principal_types": ["human", "system"],
+}
+
+
+class TestCallerAwareCapability:
+    """`can_decide` and `current_principal_decision` (Checkpoint A3): both
+    must be caller-specific and derived from the same eligibility/
+    supersession-aware machinery the write path uses -- never a second
+    algorithm."""
+
+    @pytest.mark.asyncio
+    async def test_eligible_pending_caller_can_decide_true(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.can_decide is True
+
+    @pytest.mark.asyncio
+    async def test_non_human_principal_can_decide_false_even_if_authorize_decision_would_pass(
+        self,
+    ) -> None:
+        """Regression: a resolved non-human (system) principal whose role
+        would otherwise satisfy `_authorize_decision()` must still get
+        `can_decide=False` -- the manual mutation path additionally gates on
+        `_require_human_manual_actor()` before ever reaching
+        `_authorize_decision()`, and `can_principal_decide()` must apply the
+        exact same gate, not a narrower one."""
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            system_principal = await _make_principal(
+                session,
+                ["technical-director"],
+                display_name="System Actor",
+                principal_type="system",
+            )
+            policy = await _make_policy(session, NON_HUMAN_ALLOWED_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session,
+                request.id,
+                principal=_resolved(
+                    system_principal, ["technical-director"], principal_type="system"
+                ),
+            )
+        assert detail is not None
+        assert detail.can_decide is False
+
+    @pytest.mark.asyncio
+    async def test_ineligible_role_can_decide_false(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            outsider = await _make_principal(session, [], display_name="Outsider")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(outsider, [])
+            )
+        assert detail is not None
+        assert detail.can_decide is False
+
+    @pytest.mark.asyncio
+    async def test_insufficient_trust_can_decide_false(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TRUST_GATED_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.can_decide is False
+
+    @pytest.mark.asyncio
+    async def test_terminal_request_can_decide_false(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator, status="approved")
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.can_decide is False
+
+    @pytest.mark.asyncio
+    async def test_no_own_effective_decision_returns_null(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(creator, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is None
+
+    @pytest.mark.asyncio
+    async def test_own_effective_decision_returns_its_view(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            voter = await _make_principal(session, ["technical-director"], display_name="V")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+            decision = await _cast_decision(
+                session, request, voter, "approve", ["technical-director"], reason="looks good"
+            )
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(voter, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is not None
+        assert detail.current_principal_decision.decision_id == decision.id
+        assert detail.current_principal_decision.decision == "approve"
+        assert detail.current_principal_decision.reason == "looks good"
+
+    @pytest.mark.asyncio
+    async def test_own_superseded_decision_returns_successor(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            voter = await _make_principal(session, ["technical-director"], display_name="V")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+            original = await _cast_decision(
+                session, request, voter, "reject", ["technical-director"]
+            )
+            successor = await _cast_decision(
+                session,
+                request,
+                voter,
+                "approve",
+                ["technical-director"],
+                supersedes_decision_id=original.id,
+            )
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(voter, ["technical-director"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is not None
+        assert detail.current_principal_decision.decision_id == successor.id
+        assert detail.current_principal_decision.decision == "approve"
+
+    @pytest.mark.asyncio
+    async def test_other_principal_decision_never_returned_as_caller_own(self) -> None:
+        async with _engine_and_session() as session:
+            creator = await _make_principal(session, ["technical-director"])
+            voter = await _make_principal(session, ["technical-director"], display_name="V")
+            other = await _make_principal(session, ["qa-reviewer"], display_name="Other")
+            policy = await _make_policy(session, TWO_SLOT_POLICY)
+            request = await _make_request(session, policy, creator)
+            await _cast_decision(session, request, voter, "approve", ["technical-director"])
+
+            detail = await get_approval_detail(
+                session, request.id, principal=_resolved(other, ["qa-reviewer"])
+            )
+        assert detail is not None
+        assert detail.current_principal_decision is None

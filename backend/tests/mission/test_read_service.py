@@ -135,6 +135,7 @@ async def test_get_workflow_summary_builds_cards_and_records() -> None:
                     "title": "Slice 3",
                     "url": "https://example.com/148",
                     "updatedAt": "2026-07-20T00:00:00Z",
+                    "repository": {"id": "R_1", "nameWithOwner": "Mhaizza/ai-space-colony-sim"},
                 }
             },
         ),
@@ -147,6 +148,7 @@ async def test_get_workflow_summary_builds_cards_and_records() -> None:
                     "number": 3,
                     "title": "adapter",
                     "url": "https://example.com/pr/3",
+                    "repository": {"id": "R_1", "nameWithOwner": "Mhaizza/ai-space-colony-sim"},
                 }
             },
         ),
@@ -193,8 +195,10 @@ async def test_get_workflow_summary_builds_cards_and_records() -> None:
     assert cards[148].kind == "issue"
     assert cards[148].state == "open"
     assert cards[148].title == "Slice 3"
+    assert cards[148].source_repo == "Mhaizza/ai-space-colony-sim"
     assert cards[3].kind == "pull_request"
     assert cards[3].state == "closed"
+    assert cards[3].source_repo == "Mhaizza/ai-space-colony-sim"
     # Cards sorted by number descending.
     assert [card.number for card in summary.cards] == [148, 3]
 
@@ -224,6 +228,91 @@ async def test_get_workflow_summary_keeps_unparsable_marker_records() -> None:
     assert summary.records_total == 1
     assert summary.records[0].parsed_ok is False
     assert summary.records[0].card is None
+
+
+class TestCardSourceRepoTrust:
+    """`MissionCard.source_repo` must come only from the projected
+    `content.repository.nameWithOwner` field -- never fabricated when that
+    projection is absent or malformed."""
+
+    @staticmethod
+    def _item(content: dict[str, Any]) -> McProjectionRecord:
+        return McProjectionRecord(
+            source_type="github_project_item",
+            source_id="PI1",
+            payload={"content": content},
+        )
+
+    @pytest.mark.asyncio
+    async def test_issue_card_exposes_trusted_source_repo(self) -> None:
+        item = self._item(
+            {
+                "__typename": "Issue",
+                "number": 148,
+                "repository": {"id": "R_1", "nameWithOwner": "Mhaizza/ai-space-colony-sim"},
+            }
+        )
+        session = SequentialSession([[item], [], [], []])
+        summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
+        assert summary.cards_total == 1
+        assert summary.cards[0].source_repo == "Mhaizza/ai-space-colony-sim"
+
+    @pytest.mark.asyncio
+    async def test_pull_request_card_exposes_trusted_source_repo(self) -> None:
+        item = self._item(
+            {
+                "__typename": "PullRequest",
+                "number": 172,
+                "repository": {"id": "R_1", "nameWithOwner": "Mhaizza/ai-space-colony-sim"},
+            }
+        )
+        session = SequentialSession([[item], [], [], []])
+        summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
+        assert summary.cards_total == 1
+        assert summary.cards[0].source_repo == "Mhaizza/ai-space-colony-sim"
+
+    @pytest.mark.asyncio
+    async def test_missing_repository_field_is_omitted_not_fabricated(self) -> None:
+        item = self._item({"__typename": "Issue", "number": 148})
+        session = SequentialSession([[item], [], [], []])
+        summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
+        assert summary.cards_total == 0
+
+    @pytest.mark.asyncio
+    async def test_repository_not_a_dict_is_omitted_not_fabricated(self) -> None:
+        item = self._item({"__typename": "Issue", "number": 148, "repository": "not-a-dict"})
+        session = SequentialSession([[item], [], [], []])
+        summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
+        assert summary.cards_total == 0
+
+    @pytest.mark.asyncio
+    async def test_name_with_owner_missing_is_omitted_not_fabricated(self) -> None:
+        item = self._item({"__typename": "Issue", "number": 148, "repository": {"id": "R_1"}})
+        session = SequentialSession([[item], [], [], []])
+        summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
+        assert summary.cards_total == 0
+
+    @pytest.mark.asyncio
+    async def test_name_with_owner_blank_is_omitted_not_fabricated(self) -> None:
+        item = self._item(
+            {
+                "__typename": "Issue",
+                "number": 148,
+                "repository": {"id": "R_1", "nameWithOwner": "   "},
+            }
+        )
+        session = SequentialSession([[item], [], [], []])
+        summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
+        assert summary.cards_total == 0
+
+    @pytest.mark.asyncio
+    async def test_name_with_owner_not_a_string_is_omitted_not_fabricated(self) -> None:
+        item = self._item(
+            {"__typename": "Issue", "number": 148, "repository": {"id": "R_1", "nameWithOwner": 42}}
+        )
+        session = SequentialSession([[item], [], [], []])
+        summary = await read_service.get_workflow_summary(session)  # type: ignore[arg-type]
+        assert summary.cards_total == 0
 
 
 def test_parse_iso_handles_bad_input() -> None:

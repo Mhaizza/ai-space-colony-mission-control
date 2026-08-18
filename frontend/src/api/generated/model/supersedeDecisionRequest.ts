@@ -10,7 +10,7 @@ import type { SupersedeDecisionRequestDecision } from "./supersedeDecisionReques
  * Request body for `POST /api/v1/mission/approvals/{request_id}/supersede`.
  */
 export interface SupersedeDecisionRequest {
+  supersedes_decision_id: string;
   decision: SupersedeDecisionRequestDecision;
   reason?: string | null;
-  supersedes_decision_id: string;
 }

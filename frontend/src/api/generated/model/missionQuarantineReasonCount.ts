@@ -9,6 +9,6 @@
  * Quarantine-row count for a single reason code.
  */
 export interface MissionQuarantineReasonCount {
-  count: number;
   reason_code: string;
+  count: number;
 }

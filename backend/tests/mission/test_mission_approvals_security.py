@@ -339,6 +339,54 @@ class TestPrincipalAuthorization:
         assert response.json()["detail"]["code"] == "principal_trust_insufficient"
 
 
+class TestCallerAwareDetailFailsClosed:
+    """`can_decide`/`current_principal_decision` (Slice 5B Checkpoint A) must
+    never grant capability for an unregistered/disabled caller -- the detail
+    read route fails closed the same way the mutation routes already do,
+    never silently defaulting to `can_decide=false` and inventing a 200."""
+
+    @pytest.mark.asyncio
+    async def test_unregistered_caller_detail_returns_403(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_policy(maker)
+        app = _build_app(maker, auth=_auth_for("creator"))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            created = await client.post(
+                "/api/v1/mission/approvals", json=CREATE_BODY, headers={"Idempotency-Key": "k1"}
+            )
+            request_id = created.json()["request_id"]
+
+        app2 = _build_app(maker, auth=_auth_for("nobody"))
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://test") as client:
+            response = await client.get(f"/api/v1/mission/approvals/{request_id}")
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "principal_not_registered"
+
+    @pytest.mark.asyncio
+    async def test_disabled_caller_detail_returns_403(
+        self, maker: async_sessionmaker[AsyncSession]
+    ) -> None:
+        await _seed_principal(maker, external_subject="creator", roles=["technical-director"])
+        await _seed_principal(
+            maker, external_subject="disabled", roles=["technical-director"], enabled=False
+        )
+        await _seed_policy(maker)
+        app = _build_app(maker, auth=_auth_for("creator"))
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            created = await client.post(
+                "/api/v1/mission/approvals", json=CREATE_BODY, headers={"Idempotency-Key": "k1"}
+            )
+            request_id = created.json()["request_id"]
+
+        app2 = _build_app(maker, auth=_auth_for("disabled"))
+        async with AsyncClient(transport=ASGITransport(app=app2), base_url="http://test") as client:
+            response = await client.get(f"/api/v1/mission/approvals/{request_id}")
+        assert response.status_code == 403
+        assert response.json()["detail"]["code"] == "principal_disabled"
+
+
 class TestClientCannotSpoofServerResolvedFields:
     def test_create_schema_has_no_principal_or_policy_version_fields(self) -> None:
         from app.schemas.mission_approvals import CreateApprovalRequest

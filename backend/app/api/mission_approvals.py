@@ -39,7 +39,8 @@ from app.mission.approval_service import (
     submit_decision,
     supersede_decision,
 )
-from app.mission.principal_resolver import PrincipalResolutionError
+from app.mission.principal_resolver import PrincipalResolutionError, resolve_principal
+from app.schemas.mission import MissionCardKind
 from app.schemas.mission_approvals import (
     ApprovalDecisionResponse,
     ApprovalDetailResponse,
@@ -50,6 +51,17 @@ from app.schemas.mission_approvals import (
     SupersedeDecisionRequest,
 )
 from app.schemas.pagination import DefaultLimitOffsetPage
+
+_PARTIAL_MISSION_FILTER_TUPLE = HTTPException(
+    status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+    detail={
+        "code": "partial_mission_filter_tuple",
+        "message": (
+            "mission_source_repo, mission_card_kind, and mission_card_number "
+            "must be supplied together or not at all"
+        ),
+    },
+)
 
 router = APIRouter(prefix="/mission/approvals", tags=["mission-approvals"])
 AUTH_DEP = Depends(require_user_auth)
@@ -82,10 +94,27 @@ def _require_idempotency_key(idempotency_key: str) -> str:
 async def list_approvals(
     auth: AuthContext = AUTH_DEP,
     session: AsyncSession = SESSION_DEP,
+    mission_source_repo: str | None = None,
+    mission_card_kind: MissionCardKind | None = None,
+    mission_card_number: int | None = None,
 ) -> DefaultLimitOffsetPage[ApprovalListItem]:
-    """Return a paginated list of approval requests."""
+    """Return a paginated list of approval requests.
+
+    Either all three Mission filters are supplied (exact Mission-identity
+    filtering, applied in SQL before pagination) or none are (existing
+    backward-compatible global list). A partial tuple is rejected with 422
+    before the service layer is ever called.
+    """
     _ = auth
-    return await approval_read_service.list_approvals(session)
+    parts = (mission_source_repo, mission_card_kind, mission_card_number)
+    if any(part is not None for part in parts) and not all(part is not None for part in parts):
+        raise _PARTIAL_MISSION_FILTER_TUPLE
+    return await approval_read_service.list_approvals(
+        session,
+        mission_source_repo=mission_source_repo,
+        mission_card_kind=mission_card_kind,
+        mission_card_number=mission_card_number,
+    )
 
 
 @router.get(
@@ -103,9 +132,23 @@ async def get_approval_detail(
     auth: AuthContext = AUTH_DEP,
     session: AsyncSession = SESSION_DEP,
 ) -> ApprovalDetailResponse:
-    """Return the detail view for one approval request."""
-    _ = auth
-    detail = await approval_read_service.get_approval_detail(session, request_id)
+    """Return the detail view for one approval request.
+
+    The caller identity for `can_decide`/`current_principal_decision` is
+    resolved here from server-verified `AuthContext` -- never from any
+    client-supplied value. An unregistered/disabled caller fails closed
+    with the same 403 the mutation routes already use for that case
+    (`PrincipalResolutionError` -> `to_http_exception`); this read route
+    never silently grants capability by falling back to an unresolved
+    caller.
+    """
+    try:
+        principal = await resolve_principal(auth, session)
+    except PrincipalResolutionError as exc:
+        raise to_http_exception(exc) from exc
+    detail = await approval_read_service.get_approval_detail(
+        session, request_id, principal=principal
+    )
     if detail is None:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

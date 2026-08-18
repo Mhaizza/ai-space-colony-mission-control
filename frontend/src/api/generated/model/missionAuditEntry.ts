@@ -10,11 +10,11 @@
  */
 export interface MissionAuditEntry {
   adapter_key: string;
-  error_summary: string | null;
+  started_at: string;
   finished_at: string | null;
   is_partial: boolean;
   projected: number;
   quarantined: number;
-  started_at: string;
   tombstoned: number;
+  error_summary: string | null;
 }

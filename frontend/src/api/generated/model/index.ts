@@ -80,6 +80,7 @@ export * from "./boardWebhookUpdate";
 export * from "./createApprovalApiV1MissionApprovalsPostHeaders";
 export * from "./createApprovalRequest";
 export * from "./createApprovalRequestMissionCardKind";
+export * from "./currentPrincipalDecisionView";
 export * from "./dashboardKpis";
 export * from "./dashboardMetrics";
 export * from "./dashboardMetricsApiV1MetricsDashboardGetParams";

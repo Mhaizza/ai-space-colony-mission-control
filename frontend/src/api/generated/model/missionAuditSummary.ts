@@ -10,6 +10,6 @@ import type { MissionAuditEntry } from "./missionAuditEntry";
  * Sync-audit total and a recent-entry window.
  */
 export interface MissionAuditSummary {
-  recent: MissionAuditEntry[];
   total: number;
+  recent: MissionAuditEntry[];
 }

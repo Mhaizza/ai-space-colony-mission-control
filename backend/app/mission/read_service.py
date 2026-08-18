@@ -251,7 +251,15 @@ def _card_from_project_item(
     *,
     state_by_number: dict[int, str | None],
 ) -> MissionCard | None:
-    """Build a dashboard card from a projected project-item payload."""
+    """Build a dashboard card from a projected project-item payload.
+
+    `source_repo` comes exclusively from the projected
+    `content.repository.nameWithOwner` field (never `url` parsing, never a
+    hardcoded value, never a new GitHub request). If that projection is
+    absent or malformed, the item fails closed by returning `None` rather
+    than fabricating a repository identity -- such an item is simply not
+    governance-selectable.
+    """
     content = payload.get("content")
     if not isinstance(content, dict):
         return None
@@ -266,9 +274,16 @@ def _card_from_project_item(
         kind = "pull_request"
     else:
         return None
+    repository = content.get("repository")
+    if not isinstance(repository, dict):
+        return None
+    source_repo = repository.get("nameWithOwner")
+    if not isinstance(source_repo, str) or not source_repo.strip():
+        return None
     title = content.get("title")
     url = content.get("url")
     return MissionCard(
+        source_repo=source_repo,
         number=number,
         kind=kind,
         title=title if isinstance(title, str) else None,

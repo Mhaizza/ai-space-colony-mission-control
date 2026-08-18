@@ -10,10 +10,11 @@ import type { MissionCardKind } from "./missionCardKind";
  * Project-linked issue or pull request derived from projected items.
  */
 export interface MissionCard {
-  kind: MissionCardKind;
+  source_repo: string;
   number: number;
-  state: string | null;
+  kind: MissionCardKind;
   title: string | null;
-  updated_at: string | null;
   url: string | null;
+  state: string | null;
+  updated_at: string | null;
 }

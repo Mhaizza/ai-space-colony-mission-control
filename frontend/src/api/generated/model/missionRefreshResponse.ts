@@ -7,11 +7,11 @@
 import type { MissionRefreshResponseEffectiveAssignments } from "./missionRefreshResponseEffectiveAssignments";
 
 export interface MissionRefreshResponse {
-  effective_assignments?: MissionRefreshResponseEffectiveAssignments;
-  errors?: string[];
   ok: boolean;
   partial: boolean;
   projected: number;
   quarantined: number;
   tombstoned?: number;
+  errors?: string[];
+  effective_assignments?: MissionRefreshResponseEffectiveAssignments;
 }

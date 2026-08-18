@@ -106,6 +106,7 @@ class MissionQuarantineSummary(SQLModel):
 class MissionCard(SQLModel):
     """Project-linked issue or pull request derived from projected items."""
 
+    source_repo: str
     number: int
     kind: MissionCardKind
     title: str | None
