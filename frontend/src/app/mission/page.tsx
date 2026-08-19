@@ -2,7 +2,7 @@
 
 export const dynamic = "force-dynamic";
 
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 
 import { SignedIn, SignedOut, useAuth } from "@/auth/clerk";
 import { Activity, GitPullRequest, CircleDot, ShieldAlert, Database } from "lucide-react";
@@ -10,6 +10,8 @@ import { Activity, GitPullRequest, CircleDot, ShieldAlert, Database } from "luci
 import { DashboardSidebar } from "@/components/organisms/DashboardSidebar";
 import { DashboardShell } from "@/components/templates/DashboardShell";
 import { SignedOutPanel } from "@/components/auth/SignedOutPanel";
+import { MissionGovernanceDrawer } from "@/components/mission/governance/MissionGovernanceDrawer";
+import type { SelectedMissionCard } from "@/components/mission/governance/types";
 import { ApiError } from "@/api/mutator";
 import {
   type missionAuditApiV1MissionAuditGetResponse,
@@ -145,6 +147,8 @@ function StatusBadge({ tone, label }: { tone: BadgeTone; label: string }) {
 
 export default function MissionControlPage() {
   const { isSignedIn } = useAuth();
+  const [selectedMissionCard, setSelectedMissionCard] =
+    useState<SelectedMissionCard | null>(null);
 
   const overviewQuery = useMissionOverviewApiV1MissionOverviewGet<
     missionOverviewApiV1MissionOverviewGetResponse,
@@ -359,9 +363,18 @@ export default function MissionControlPage() {
                 {cards.length > 0 ? (
                   <div className="max-h-[360px] space-y-2 overflow-y-auto pr-1">
                     {cards.map((card) => (
-                      <div
+                      <button
+                        type="button"
                         key={`${card.kind}-${card.number}`}
-                        className="rounded-lg border border-slate-200 px-3 py-2"
+                        onClick={() =>
+                          setSelectedMissionCard({
+                            source_repo: card.source_repo,
+                            kind: card.kind,
+                            number: card.number,
+                            title: card.title,
+                          })
+                        }
+                        className="w-full rounded-lg border border-slate-200 px-3 py-2 text-left"
                       >
                         <div className="flex items-center justify-between gap-3">
                           <span className="min-w-0 truncate text-sm font-medium text-slate-900">
@@ -377,7 +390,7 @@ export default function MissionControlPage() {
                             {card.state ? ` · ${card.state}` : ""}
                           </span>
                         </div>
-                      </div>
+                      </button>
                     ))}
                   </div>
                 ) : (
@@ -539,6 +552,12 @@ export default function MissionControlPage() {
             </div>
           </div>
         </main>
+        {selectedMissionCard ? (
+          <MissionGovernanceDrawer
+            card={selectedMissionCard}
+            onClose={() => setSelectedMissionCard(null)}
+          />
+        ) : null}
       </SignedIn>
     </DashboardShell>
   );
