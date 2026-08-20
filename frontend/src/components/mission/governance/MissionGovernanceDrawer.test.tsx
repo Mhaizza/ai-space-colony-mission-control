@@ -37,47 +37,42 @@ describe("MissionGovernanceDrawer", () => {
     expect(screen.getByTestId("approval-detail-pane-mount")).toBeInTheDocument();
   });
 
-  it("resets selectedApprovalRequestId to null when the card prop changes", () => {
+  it("starts with no approval selected, and remains so across a Mission switch", () => {
     const { rerender } = render(
       <MissionGovernanceDrawer card={issueCard} onClose={vi.fn()} />,
     );
 
-    fireEvent.click(screen.getByTestId("stub-select-approval"));
     expect(screen.getByTestId("approval-detail-pane-mount")).toHaveAttribute(
       "data-selected-request-id",
-      "stub-request-id",
+      "",
     );
 
+    // Deferred to Task 8 (real ApprovalListPane selection exists): the
+    // stronger "non-null selection resets to null on Mission switch" case.
     rerender(<MissionGovernanceDrawer card={pullRequestCard} onClose={vi.fn()} />);
 
     expect(screen.getByTestId("approval-detail-pane-mount")).toHaveAttribute(
       "data-selected-request-id",
       "",
     );
+    const drawer = screen.getByTestId("mission-governance-drawer");
+    expect(drawer).toHaveTextContent(pullRequestCard.source_repo);
+    expect(drawer).toHaveTextContent("Pull request");
+    expect(drawer).toHaveTextContent(`#${pullRequestCard.number}`);
+    expect(drawer).toHaveTextContent(pullRequestCard.title as string);
   });
 
-  it("applies the responsive mount classes for the unselected state", () => {
+  it("applies the responsive mount classes for the default (no-selection) shell state", () => {
     render(<MissionGovernanceDrawer card={issueCard} onClose={vi.fn()} />);
 
+    // Deferred to Task 8/9 (real ApprovalListPane selection exists): the
+    // selected-state class assertions.
     expect(screen.getByTestId("approval-list-pane-mount")).toHaveClass("block");
     expect(screen.getByTestId("approval-list-pane-mount")).not.toHaveClass("hidden");
     expect(screen.getByTestId("approval-detail-pane-mount")).toHaveClass(
       "hidden",
       "md:block",
     );
-  });
-
-  it("applies the responsive mount classes for the selected state", () => {
-    render(<MissionGovernanceDrawer card={issueCard} onClose={vi.fn()} />);
-
-    fireEvent.click(screen.getByTestId("stub-select-approval"));
-
-    expect(screen.getByTestId("approval-list-pane-mount")).toHaveClass(
-      "hidden",
-      "md:block",
-    );
-    expect(screen.getByTestId("approval-detail-pane-mount")).toHaveClass("block");
-    expect(screen.getByTestId("approval-detail-pane-mount")).not.toHaveClass("hidden");
   });
 
   it("calls onClose when the close control is activated, and it is keyboard-accessible", () => {

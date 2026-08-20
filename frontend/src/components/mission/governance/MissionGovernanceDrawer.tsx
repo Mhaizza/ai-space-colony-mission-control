@@ -42,8 +42,6 @@ export function MissionGovernanceDrawer({
     setSelection({ cardKey, selectedApprovalRequestId: null });
   }
   const selectedApprovalRequestId = selection.selectedApprovalRequestId;
-  const setSelectedApprovalRequestId = (requestId: string | null) =>
-    setSelection((prev) => ({ ...prev, selectedApprovalRequestId: requestId }));
 
   const listPaneVisible = selectedApprovalRequestId ? "hidden md:block" : "block";
   const detailPaneVisible = selectedApprovalRequestId ? "block" : "hidden md:block";
@@ -71,14 +69,6 @@ export function MissionGovernanceDrawer({
       <div className="flex min-h-0 flex-1">
         <div data-testid="approval-list-pane-mount" className={listPaneVisible}>
           {/* Task 4/5 wires the real ApprovalListPane here. */}
-          <button
-            type="button"
-            data-testid="stub-select-approval"
-            className="sr-only"
-            onClick={() => setSelectedApprovalRequestId("stub-request-id")}
-          >
-            stub select
-          </button>
         </div>
         <div
           data-testid="approval-detail-pane-mount"
