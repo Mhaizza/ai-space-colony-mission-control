@@ -44,18 +44,31 @@ const approvalTwo: ApprovalListItem = {
   created_at: "2026-08-18T10:00:00Z",
 };
 
-function renderPane() {
+function renderPane(overrides: {
+  selectedApprovalRequestId?: string | null;
+  onSelect?: (requestId: string) => void;
+} = {}) {
   return render(
     <ApprovalListPane
       card={missionCard}
-      selectedApprovalRequestId={null}
-      onSelect={vi.fn()}
+      selectedApprovalRequestId={overrides.selectedApprovalRequestId ?? null}
+      onSelect={overrides.onSelect ?? vi.fn()}
     />,
   );
 }
 
 function setQueryResult(result: Partial<ApprovalListQueryResult>) {
   mockedUseListApprovals.mockReturnValue(result as ApprovalListQueryResult);
+}
+
+function getRowByRequestId(requestId: string): HTMLElement {
+  const row = screen
+    .getAllByTestId("approval-list-row")
+    .find((element) => element.getAttribute("data-request-id") === requestId);
+  if (!row) {
+    throw new Error(`No row found for request_id ${requestId}`);
+  }
+  return row;
 }
 
 describe("ApprovalListPane", () => {
@@ -153,5 +166,117 @@ describe("ApprovalListPane", () => {
     renderPane();
 
     expect(screen.getAllByTestId("approval-list-row")).toHaveLength(2);
+  });
+
+  it("renders rows in orderApprovals order: pending newest-first, then terminal newest-first", () => {
+    const pendingOlder: ApprovalListItem = {
+      ...approvalOne,
+      request_id: "pending-older",
+      status: "pending",
+      created_at: "2026-08-01T00:00:00Z",
+    };
+    const pendingNewer: ApprovalListItem = {
+      ...approvalOne,
+      request_id: "pending-newer",
+      status: "pending",
+      created_at: "2026-08-10T00:00:00Z",
+    };
+    const terminalOlder: ApprovalListItem = {
+      ...approvalOne,
+      request_id: "terminal-older",
+      status: "rejected",
+      created_at: "2026-07-01T00:00:00Z",
+    };
+    const terminalNewer: ApprovalListItem = {
+      ...approvalOne,
+      request_id: "terminal-newer",
+      status: "approved",
+      created_at: "2026-07-15T00:00:00Z",
+    };
+
+    setQueryResult({
+      data: {
+        status: 200,
+        data: {
+          // scrambled input order
+          items: [terminalOlder, pendingOlder, terminalNewer, pendingNewer],
+          total: 4,
+          limit: 200,
+          offset: 0,
+        },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPane();
+
+    const renderedIds = screen
+      .getAllByTestId("approval-list-row")
+      .map((row) => row.getAttribute("data-request-id"));
+
+    expect(renderedIds).toEqual([
+      "pending-newer",
+      "pending-older",
+      "terminal-newer",
+      "terminal-older",
+    ]);
+  });
+
+  it("calls onSelect with the exact request_id of the clicked row", () => {
+    const onSelect = vi.fn();
+    setQueryResult({
+      data: {
+        status: 200,
+        data: {
+          items: [approvalOne, approvalTwo],
+          total: 2,
+          limit: 200,
+          offset: 0,
+        },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPane({ onSelect });
+
+    fireEvent.click(getRowByRequestId(approvalTwo.request_id));
+
+    expect(onSelect).toHaveBeenCalledTimes(1);
+    expect(onSelect).toHaveBeenCalledWith(approvalTwo.request_id);
+  });
+
+  it("marks only the row matching selectedApprovalRequestId as selected", () => {
+    setQueryResult({
+      data: {
+        status: 200,
+        data: {
+          items: [approvalOne, approvalTwo],
+          total: 2,
+          limit: 200,
+          offset: 0,
+        },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+
+    renderPane({ selectedApprovalRequestId: approvalOne.request_id });
+
+    expect(getRowByRequestId(approvalOne.request_id)).toHaveAttribute(
+      "aria-current",
+      "true",
+    );
+    expect(getRowByRequestId(approvalTwo.request_id)).not.toHaveAttribute(
+      "aria-current",
+      "true",
+    );
   });
 });
