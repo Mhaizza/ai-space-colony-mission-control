@@ -32,25 +32,31 @@ vi.mock("@/api/generated/mission/mission", () => ({
   }),
 }));
 
-vi.mock("@/api/generated/mission-approvals/mission-approvals", () => ({
-  useListApprovalsApiV1MissionApprovalsGet: () => ({
-    data: {
-      status: 200,
-      data: { items: [], total: 0, limit: 200, offset: 0 },
-    },
-    isLoading: false,
-    isError: false,
-    error: null,
-    refetch: vi.fn(),
+vi.mock(
+  "@/api/generated/mission-approvals/mission-approvals",
+  async (importOriginal) => ({
+    ...(await importOriginal<
+      typeof import("@/api/generated/mission-approvals/mission-approvals")
+    >()),
+    useListApprovalsApiV1MissionApprovalsGet: () => ({
+      data: {
+        status: 200,
+        data: { items: [], total: 0, limit: 200, offset: 0 },
+      },
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    }),
+    useGetApprovalDetailApiV1MissionApprovalsRequestIdGet: () => ({
+      data: undefined,
+      isLoading: false,
+      isError: false,
+      error: null,
+      refetch: vi.fn(),
+    }),
   }),
-  useGetApprovalDetailApiV1MissionApprovalsRequestIdGet: () => ({
-    data: undefined,
-    isLoading: false,
-    isError: false,
-    error: null,
-    refetch: vi.fn(),
-  }),
-}));
+);
 
 const overviewResponse = {
   status: 200 as const,

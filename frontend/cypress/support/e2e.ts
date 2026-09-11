@@ -9,6 +9,8 @@ import { addClerkCommands } from "@clerk/testing/cypress";
 // on /sign-in. Ignore this known UI noise so E2E assertions can proceed.
 Cypress.on("uncaught:exception", (err) => {
   if (err?.message?.includes("Hydration failed")) {
+    // Checkpoint C explicitly verifies hydration; do not mask regressions there.
+    if (Cypress.spec.name === "mission_decisions.cy.ts") throw err;
     return false;
   }
   return true;

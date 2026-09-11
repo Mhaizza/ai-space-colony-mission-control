@@ -39,7 +39,7 @@ export function ApprovalListPane({
     );
   }
 
-  if (query.isError) {
+  if (query.isError && !query.data) {
     return (
       <div
         className="m-4 rounded-lg border border-rose-200 bg-rose-50 p-4"
@@ -60,18 +60,29 @@ export function ApprovalListPane({
 
   const items = query.data?.status === 200 ? query.data.data.items : [];
 
-  if (items.length === 0) {
-    return (
-      <p className="p-4 text-sm text-slate-500">
-        No approvals for this Mission
-      </p>
-    );
-  }
-
   const orderedItems = orderApprovals(items);
 
   return (
     <div className="space-y-2 p-4">
+      {query.isError ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-rose-200 p-3 text-sm"
+        >
+          Unable to refresh approvals. Previously loaded information is shown.
+          <Button
+            className="mt-2"
+            variant="outline"
+            size="sm"
+            onClick={() => void query.refetch()}
+          >
+            Retry
+          </Button>
+        </div>
+      ) : null}
+      {items.length === 0 ? (
+        <p className="text-sm text-slate-500">No approvals for this Mission</p>
+      ) : null}
       {orderedItems.map((item) => (
         <button
           aria-current={
