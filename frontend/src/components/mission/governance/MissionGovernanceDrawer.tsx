@@ -8,6 +8,7 @@ import { Button } from "@/components/ui/button";
 import { ApprovalDetailPane } from "./ApprovalDetailPane";
 import { ApprovalListPane } from "./ApprovalListPane";
 import type { SelectedMissionCard } from "./types";
+import type { MissionDecisionController } from "./useMissionDecision";
 
 function kindLabel(kind: SelectedMissionCard["kind"]): string {
   return kind === "pull_request" ? "Pull request" : "Issue";
@@ -16,9 +17,11 @@ function kindLabel(kind: SelectedMissionCard["kind"]): string {
 export function MissionGovernanceDrawer({
   card,
   onClose,
+  decisionController,
 }: {
   card: SelectedMissionCard;
   onClose: () => void;
+  decisionController?: MissionDecisionController;
 }) {
   const missionIdentity = `${card.source_repo}:${card.kind}:${card.number}`;
   const [previousMissionIdentity, setPreviousMissionIdentity] =
@@ -89,7 +92,10 @@ export function MissionGovernanceDrawer({
             </div>
           ) : null}
           <ApprovalDetailPane
+            key={`${missionIdentity}/${selectedApprovalRequestId ?? "none"}`}
             selectedApprovalRequestId={selectedApprovalRequestId}
+            card={card}
+            decisionController={decisionController}
           />
         </div>
       </div>

@@ -1,21 +1,41 @@
 "use client";
 
+import { useState } from "react";
 import { useGetApprovalDetailApiV1MissionApprovalsRequestIdGet } from "@/api/generated/mission-approvals/mission-approvals";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { formatTimestamp } from "@/lib/formatters";
 
 import { statusBadgeVariant } from "./governanceStatus";
+import { DecisionDialog } from "./DecisionDialog";
+import type { SelectedMissionCard } from "./types";
+import {
+  matchesDecisionTarget,
+  type MissionDecisionController,
+} from "./useMissionDecision";
 
 export function ApprovalDetailPane({
   selectedApprovalRequestId,
+  card,
+  decisionController,
 }: {
   selectedApprovalRequestId: string | null;
+  card?: SelectedMissionCard;
+  decisionController?: MissionDecisionController;
 }) {
+  const [choice, setChoice] = useState<"approve" | "reject" | null>(null);
   const query = useGetApprovalDetailApiV1MissionApprovalsRequestIdGet(
     selectedApprovalRequestId ?? "",
-    { query: { enabled: selectedApprovalRequestId !== null } },
+    {
+      query: {
+        enabled: selectedApprovalRequestId !== null,
+        ...(decisionController
+          ? { refetchOnMount: "always" as const, staleTime: 15_000 }
+          : {}),
+      },
+    },
   );
+  const detail = query.data?.status === 200 ? query.data.data : null;
 
   if (selectedApprovalRequestId === null) {
     return (
@@ -25,7 +45,7 @@ export function ApprovalDetailPane({
     );
   }
 
-  if (query.isLoading) {
+  if (query.isLoading && !detail) {
     return (
       <div className="space-y-4 p-4" aria-label="Loading approval details">
         <div
@@ -36,7 +56,7 @@ export function ApprovalDetailPane({
     );
   }
 
-  if (query.isError) {
+  if (query.isError && !detail) {
     return (
       <div
         className="m-4 rounded-lg border border-rose-200 bg-rose-50 p-4"
@@ -55,17 +75,56 @@ export function ApprovalDetailPane({
     );
   }
 
-  const detail = query.data?.status === 200 ? query.data.data : null;
-
   if (!detail) {
     return null;
   }
+  const target = card
+    ? { requestId: selectedApprovalRequestId, card, action: detail.action_key }
+    : null;
+  const operation = decisionController?.operation(selectedApprovalRequestId);
+  const busy = operation?.phase === "sending";
+  const eligible =
+    !!target &&
+    matchesDecisionTarget(detail, target) &&
+    detail.status === "pending" &&
+    detail.can_decide &&
+    detail.current_principal_decision === null;
+  const fresh =
+    !query.isError &&
+    !query.isFetching &&
+    !query.isStale &&
+    query.isFetchedAfterMount &&
+    query.dataUpdatedAt >= (decisionController?.readEpoch ?? 0);
+  const canConfirm =
+    !!decisionController?.signedIn &&
+    eligible &&
+    fresh &&
+    (!operation || operation.phase === "rejected");
 
   return (
     <article
       className="space-y-6 overflow-y-auto p-4 md:p-6"
       data-testid="approval-detail"
     >
+      {query.isError ? (
+        <div
+          role="alert"
+          className="rounded-lg border border-rose-200 p-3 text-sm"
+        >
+          Unable to refresh approval details. Previously loaded information is
+          shown.
+        </div>
+      ) : null}
+      {decisionController && (query.isError || query.isStale) ? (
+        <Button
+          variant="outline"
+          size="sm"
+          disabled={query.isFetching}
+          onClick={() => void query.refetch()}
+        >
+          Refresh details
+        </Button>
+      ) : null}
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
           <p className="text-xs font-semibold uppercase tracking-wider text-slate-500">
@@ -219,6 +278,89 @@ export function ApprovalDetailPane({
           <p className="mt-2">No current decision</p>
         )}
       </section>
+      {operation ? (
+        <section
+          aria-live="polite"
+          className="rounded-lg border border-slate-200 p-3 text-sm"
+        >
+          <p
+            role={
+              operation.phase === "uncertain" ||
+              operation.phase === "rejected" ||
+              operation.refreshFailed
+                ? "alert"
+                : "status"
+            }
+          >
+            {operation.message}
+          </p>
+          {operation.phase === "uncertain" ? (
+            <>
+              <p className="mt-2">
+                Submitted decision: {operation.data.decision}
+              </p>
+              <p>Reason: {operation.data.reason ?? "No reason provided"}</p>
+              <Button
+                className="mt-2"
+                variant="outline"
+                onClick={() =>
+                  void decisionController?.retry(selectedApprovalRequestId)
+                }
+              >
+                Retry same decision
+              </Button>
+            </>
+          ) : null}
+          {operation.phase !== "sending" && operation.phase !== "refreshing" ? (
+            <Button
+              className="ml-2 mt-2"
+              variant="outline"
+              onClick={() =>
+                void decisionController?.refresh(selectedApprovalRequestId)
+              }
+            >
+              Refresh information
+            </Button>
+          ) : null}
+        </section>
+      ) : null}
+      {eligible &&
+      decisionController &&
+      (!operation || operation.phase === "rejected") ? (
+        <div className="flex gap-2">
+          <Button disabled={!canConfirm} onClick={() => setChoice("approve")}>
+            Approve
+          </Button>
+          <Button
+            variant="outline"
+            disabled={!canConfirm}
+            onClick={() => setChoice("reject")}
+          >
+            Reject
+          </Button>
+        </div>
+      ) : null}
+      {choice && target && decisionController ? (
+        <DecisionDialog
+          target={target}
+          decision={choice}
+          busy={busy}
+          errorMessage={
+            operation?.phase === "rejected" ? operation.message : undefined
+          }
+          canConfirm={canConfirm}
+          onClose={() => setChoice(null)}
+          onConfirm={(reason) => {
+            if (!canConfirm) return;
+            void decisionController
+              .confirm(target, choice, reason)
+              .then((phase) => {
+                if (phase === "recorded" || phase === "uncertain")
+                  setChoice(null);
+              });
+          }}
+        />
+      ) : null}
     </article>
   );
 }

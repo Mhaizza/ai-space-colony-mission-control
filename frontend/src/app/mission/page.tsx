@@ -11,6 +11,7 @@ import { DashboardSidebar } from "@/components/organisms/DashboardSidebar";
 import { DashboardShell } from "@/components/templates/DashboardShell";
 import { SignedOutPanel } from "@/components/auth/SignedOutPanel";
 import { MissionGovernanceDrawer } from "@/components/mission/governance/MissionGovernanceDrawer";
+import { useMissionDecision } from "@/components/mission/governance/useMissionDecision";
 import type { SelectedMissionCard } from "@/components/mission/governance/types";
 import { ApiError } from "@/api/mutator";
 import {
@@ -146,6 +147,7 @@ function StatusBadge({ tone, label }: { tone: BadgeTone; label: string }) {
 }
 
 export default function MissionControlPage() {
+  const decisionController = useMissionDecision();
   const { isSignedIn } = useAuth();
   const [selectedMissionCard, setSelectedMissionCard] =
     useState<SelectedMissionCard | null>(null);
@@ -552,6 +554,7 @@ export default function MissionControlPage() {
             </div>
             {selectedMissionCard ? (
               <MissionGovernanceDrawer
+                decisionController={decisionController}
                 card={selectedMissionCard}
                 onClose={() => setSelectedMissionCard(null)}
               />

@@ -68,6 +68,30 @@ describe("ApprovalListPane query states", () => {
     useListApprovals.mockReset();
   });
 
+  it.each([{ items: [] }, { items: [item] }])(
+    "retains cached rows or empty state while showing a refresh error",
+    ({ items }) => {
+      const refetch = vi.fn();
+      useListApprovals.mockReturnValue({
+        ...success(items),
+        isError: true,
+        refetch,
+      });
+      renderPane();
+      expect(screen.getByRole("alert")).toHaveTextContent(
+        "Unable to refresh approvals",
+      );
+      if (items.length)
+        expect(screen.getByTestId("approval-list-row")).toBeInTheDocument();
+      else
+        expect(
+          screen.getByText("No approvals for this Mission"),
+        ).toBeInTheDocument();
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      expect(refetch).toHaveBeenCalledOnce();
+    },
+  );
+
   it("queries with the selected card's exact complete Mission identity", () => {
     useListApprovals.mockReturnValue(success([]));
 
