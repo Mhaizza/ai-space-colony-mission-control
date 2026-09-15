@@ -110,22 +110,26 @@ async function start() {
 function serve(input: string | URL | Request, init?: RequestInit) {
   const url = new URL(String(input));
   if (init?.method === "POST") {
+    const body = JSON.parse(String(init.body));
+    const decisionId = url.pathname.endsWith("/supersede")
+      ? `${body.supersedes_decision_id}-next`
+      : "decision-a";
     detail = {
       ...detail,
       current_principal_decision: {
-        decision_id: "decision-a",
-        decision: "approve",
-        reason: null,
+        decision_id: decisionId,
+        decision: body.decision,
+        reason: body.reason,
         created_at: detail.created_at,
       },
     };
     return Promise.resolve(
       json({
         request_id: "request-a",
-        decision_id: "decision-a",
+        decision_id: decisionId,
         principal_id: "local",
-        decision: "approve",
-        reason: null,
+        decision: body.decision,
+        reason: body.reason,
         status: "pending",
         quorum_satisfied: false,
         mission_effect: null,
@@ -171,6 +175,174 @@ afterEach(() => {
 });
 
 describe("Mission decision UI with real query hooks", () => {
+  it("shows acknowledged-ID conflict as recorded, locks new intent, and refreshes GET only", async () => {
+    fetchMock.mockImplementation(async (input, init) => {
+      const result = await serve(input, init);
+      if (init?.method === "POST") {
+        detail = {
+          ...detail,
+          current_principal_decision: {
+            ...detail.current_principal_decision!,
+            decision_id: "external-successor",
+          },
+        };
+      }
+      return result;
+    });
+    mount();
+    await selectRequest();
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm approve" }));
+    await screen.findByText(
+      /Decision recorded, but the current decision has changed/,
+    );
+    expect(
+      screen.getByRole("button", { name: "Change decision" }),
+    ).toBeDisabled();
+    expect(
+      screen.queryByRole("button", { name: "Retry same decision" }),
+    ).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Refresh information" }),
+    );
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Refresh information" }),
+      ).toBeEnabled(),
+    );
+    expect(
+      fetchMock.mock.calls.filter((call) => call[1]?.method === "POST"),
+    ).toHaveLength(1);
+    expect(
+      screen.getByRole("button", { name: "Change decision" }),
+    ).toBeDisabled();
+  });
+
+  it("preserves a supersede retry across Back and drawer close/reopen without leaking to another Mission", async () => {
+    detail = {
+      ...baseDetail,
+      current_principal_decision: {
+        decision_id: "prior",
+        decision: "approve",
+        reason: "old",
+        created_at: baseDetail.created_at,
+      },
+    };
+    fetchMock.mockImplementation((input, init) =>
+      init?.method === "POST"
+        ? Promise.resolve(json({}, 503))
+        : serve(input, init),
+    );
+    mount();
+    await selectRequest();
+    fireEvent.click(screen.getByRole("button", { name: "Change decision" }));
+    fireEvent.change(screen.getByLabelText("New decision"), {
+      target: { value: "reject" },
+    });
+    fireEvent.change(screen.getByRole("textbox"), {
+      target: { value: "new reason" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reject" }));
+    await screen.findByRole("button", { name: "Retry same decision" });
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await selectRequest();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close governance drawer" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open Beta" }));
+    await selectRequest();
+    expect(screen.queryByText("new reason")).not.toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Close governance drawer" }),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Open Alpha" }));
+    await selectRequest();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry same decision" }),
+    );
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter((call) => call[1]?.method === "POST"),
+      ).toHaveLength(2),
+    );
+    const posts = fetchMock.mock.calls.filter(
+      (call) => call[1]?.method === "POST",
+    );
+    expect(posts[1][0]).toBe(posts[0][0]);
+    expect(posts[1][1]?.body).toBe(posts[0][1]?.body);
+    expect(new Headers(posts[1][1]?.headers).get("Idempotency-Key")).toBe(
+      new Headers(posts[0][1]?.headers).get("Idempotency-Key"),
+    );
+  });
+
+  it("offers Change decision after initial success and captures the current prior ID", async () => {
+    mount();
+    await selectRequest();
+    await start();
+    fireEvent.click(screen.getByRole("button", { name: "Confirm approve" }));
+    const change = await screen.findByRole("button", {
+      name: "Change decision",
+    });
+    await waitFor(() => expect(change).toBeEnabled());
+    fireEvent.click(change);
+    expect(screen.getByRole("dialog")).toHaveTextContent("decision-a");
+    fireEvent.change(screen.getByLabelText("New decision"), {
+      target: { value: "reject" },
+    });
+    fireEvent.click(screen.getByRole("button", { name: "Confirm reject" }));
+    await waitFor(() =>
+      expect(
+        fetchMock.mock.calls.filter((call) => call[1]?.method === "POST"),
+      ).toHaveLength(2),
+    );
+    const lastPost = fetchMock.mock.calls.filter(
+      (call) => call[1]?.method === "POST",
+    )[1];
+    expect(String(lastPost[0])).toMatch(/supersede$/);
+    expect(JSON.parse(String(lastPost[1]?.body))).toEqual({
+      supersedes_decision_id: "decision-a",
+      decision: "reject",
+      reason: null,
+    });
+  });
+
+  it("blocks a captured change-decision draft when the current ID changes", async () => {
+    detail = {
+      ...baseDetail,
+      current_principal_decision: {
+        decision_id: "prior",
+        decision: "approve",
+        reason: "old reason",
+        created_at: baseDetail.created_at,
+      },
+    };
+    mount();
+    await selectRequest();
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Change decision" }),
+    );
+    detail = {
+      ...detail,
+      current_principal_decision: {
+        ...detail.current_principal_decision!,
+        decision_id: "newer",
+      },
+    };
+    await act(async () => {
+      await client.refetchQueries({ type: "active" });
+    });
+    await waitFor(() =>
+      expect(
+        screen.getByRole("button", { name: "Confirm approve" }),
+      ).toBeDisabled(),
+    );
+    expect(screen.getByRole("dialog")).toHaveTextContent("prior");
+    fireEvent.click(screen.getByRole("button", { name: "Confirm approve" }));
+    expect(
+      fetchMock.mock.calls.filter((call) => call[1]?.method === "POST"),
+    ).toHaveLength(0);
+  });
+
   it("opens confirmation without POST, sends once on confirmation and retains backend detail", async () => {
     mount();
     await selectRequest();
@@ -187,7 +359,7 @@ describe("Mission decision UI with real query hooks", () => {
     ).not.toBeInTheDocument();
     expect(
       screen.queryByRole("button", { name: /change decision/i }),
-    ).not.toBeInTheDocument();
+    ).toBeInTheDocument();
     expect(
       fetchMock.mock.calls.filter((call) => call[1]?.method === "POST"),
     ).toHaveLength(1);
@@ -246,29 +418,46 @@ describe("Mission decision UI with real query hooks", () => {
     );
   });
 
-  it("keeps the reason editable after a validation rejection", async () => {
-    fetchMock.mockImplementation((input, init) =>
-      init?.method === "POST"
-        ? Promise.resolve(json({ detail: "invalid reason" }, 422))
-        : serve(input, init),
-    );
-    mount();
-    await selectRequest();
-    await start();
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "Keep this reason" },
-    });
-    fireEvent.click(screen.getByRole("button", { name: "Confirm approve" }));
-    await waitFor(() =>
+  it.each([false, true])(
+    "keeps the reason editable after a validation rejection (supersede: %s)",
+    async (supersede) => {
+      if (supersede)
+        detail = {
+          ...baseDetail,
+          current_principal_decision: {
+            decision_id: "prior",
+            decision: "approve",
+            reason: "old reason",
+            created_at: baseDetail.created_at,
+          },
+        };
+      fetchMock.mockImplementation((input, init) =>
+        init?.method === "POST"
+          ? Promise.resolve(json({ detail: "invalid reason" }, 422))
+          : serve(input, init),
+      );
+      mount();
+      await selectRequest();
+      if (supersede)
+        fireEvent.click(
+          screen.getByRole("button", { name: "Change decision" }),
+        );
+      else await start();
+      fireEvent.change(screen.getByRole("textbox"), {
+        target: { value: "Keep this reason" },
+      });
+      fireEvent.click(screen.getByRole("button", { name: "Confirm approve" }));
+      await waitFor(() =>
+        expect(
+          screen.getByRole("button", { name: "Confirm approve" }),
+        ).toBeEnabled(),
+      );
+      expect(screen.getByRole("textbox")).toHaveValue("Keep this reason");
       expect(
-        screen.getByRole("button", { name: "Confirm approve" }),
-      ).toBeEnabled(),
-    );
-    expect(screen.getByRole("textbox")).toHaveValue("Keep this reason");
-    expect(
-      within(screen.getByRole("dialog")).getByRole("alert"),
-    ).toHaveTextContent("not accepted");
-  });
+        within(screen.getByRole("dialog")).getByRole("alert"),
+      ).toHaveTextContent("not accepted");
+    },
+  );
 
   it("does not show a late result on a different Mission", async () => {
     let complete!: (response: Response) => void;
@@ -289,7 +478,10 @@ describe("Mission decision UI with real query hooks", () => {
     await selectRequest();
     await act(async () => {
       complete(
-        await serve("http://localhost/request-a/decisions", { method: "POST" }),
+        await serve("http://localhost/request-a/decisions", {
+          method: "POST",
+          body: JSON.stringify({ decision: "approve", reason: null }),
+        }),
       );
     });
     await waitFor(() =>

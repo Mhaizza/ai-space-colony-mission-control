@@ -12,6 +12,11 @@ import {
   DialogTitle,
 } from "@/components/ui/dialog";
 import type { SelectedMissionCard } from "./types";
+import type { ApprovalDetailResponse } from "@/api/generated/model";
+
+export type PriorDecision = NonNullable<
+  ApprovalDetailResponse["current_principal_decision"]
+>;
 
 export interface DecisionTarget {
   requestId: string;
@@ -25,6 +30,8 @@ export function DecisionDialog({
   canConfirm,
   busy = false,
   errorMessage,
+  priorDecision,
+  onDecisionChange,
   onConfirm,
   onClose,
 }: {
@@ -33,6 +40,8 @@ export function DecisionDialog({
   canConfirm: boolean;
   busy?: boolean;
   errorMessage?: string;
+  priorDecision?: PriorDecision;
+  onDecisionChange?: (decision: "approve" | "reject") => void;
   onConfirm: (reason: string) => void;
   onClose: () => void;
 }) {
@@ -59,7 +68,9 @@ export function DecisionDialog({
         }}
       >
         <DialogHeader>
-          <DialogTitle>Confirm {decision}</DialogTitle>
+          <DialogTitle>
+            {priorDecision ? "Change decision" : `Confirm ${decision}`}
+          </DialogTitle>
           <DialogDescription>
             {target.card.source_repo} · {target.card.kind} · #
             {target.card.number}
@@ -67,6 +78,35 @@ export function DecisionDialog({
             {target.action ?? "Approval request"} · {target.requestId}
           </DialogDescription>
         </DialogHeader>
+        {priorDecision ? (
+          <section className="mt-3 space-y-2 text-sm">
+            <p>
+              Previous decision: {priorDecision.decision} ·{" "}
+              {priorDecision.decision_id}
+            </p>
+            <p>
+              Previous reason: {priorDecision.reason ?? "No reason provided"}
+            </p>
+            <label className="block">
+              New decision
+              <select
+                className="mt-1 block w-full rounded border p-2"
+                value={decision}
+                disabled={busy}
+                onChange={(event) => {
+                  if (
+                    event.target.value === "approve" ||
+                    event.target.value === "reject"
+                  )
+                    onDecisionChange?.(event.target.value);
+                }}
+              >
+                <option value="approve">Approve</option>
+                <option value="reject">Reject</option>
+              </select>
+            </label>
+          </section>
+        ) : null}
         <label className="mt-4 block text-sm font-medium" htmlFor={reasonId}>
           Reason (optional)
         </label>

@@ -8,8 +8,10 @@ describe("Mission decisions — mocked API", () => {
   setupCommonPageTestHooks("**/api/v1");
   let detail: ApprovalDetailResponse;
   let writes: number;
+  let keys: string[];
   beforeEach(() => {
     writes = 0;
+    keys = [];
     detail = {
       request_id: "request-a",
       status: "pending",
@@ -35,8 +37,8 @@ describe("Mission decisions — mocked API", () => {
     cy.intercept("**/api/v1/**", (request) => {
       if (request.method !== "GET") {
         expect(request.method).to.eq("POST");
-        expect(new URL(request.url).pathname).to.eq(
-          "/api/v1/mission/approvals/request-a/decisions",
+        expect(new URL(request.url).pathname).to.match(
+          /^\/api\/v1\/mission\/approvals\/request-a\/(decisions|supersede)$/,
         );
         request.reply({ statusCode: 500, body: {} });
       } else request.reply({ statusCode: 200, body: { items: [], total: 0 } });
@@ -94,6 +96,7 @@ describe("Mission decisions — mocked API", () => {
       "**/api/v1/mission/approvals/request-a/decisions",
       (request) => {
         writes += 1;
+        keys.push(String(request.headers["idempotency-key"]));
         expect(request.headers["idempotency-key"]).to.be.a("string");
         expect(
           String(request.headers["idempotency-key"]).length,
@@ -121,6 +124,48 @@ describe("Mission decisions — mocked API", () => {
         });
       },
     ).as("decision");
+    cy.intercept(
+      "POST",
+      "**/api/v1/mission/approvals/request-a/supersede",
+      (request) => {
+        expect(request.body).to.have.all.keys(
+          "supersedes_decision_id",
+          "decision",
+          "reason",
+        );
+        expect(request.body.supersedes_decision_id).to.eq(
+          detail.current_principal_decision?.decision_id,
+        );
+        expect(request.headers["idempotency-key"]).to.be.a("string");
+        const key = String(request.headers["idempotency-key"]);
+        expect(key.length).to.be.greaterThan(0);
+        expect(keys).not.to.include(key);
+        keys.push(key);
+        writes += 1;
+        const decisionId = `d${writes}`;
+        detail = {
+          ...detail,
+          status: request.body.decision === "reject" ? "rejected" : "pending",
+          current_principal_decision: {
+            decision_id: decisionId,
+            decision: request.body.decision,
+            reason: request.body.reason,
+            created_at: detail.created_at,
+          },
+        };
+        request.reply({
+          request_id: "request-a",
+          decision_id: decisionId,
+          principal_id: "p1",
+          decision: request.body.decision,
+          reason: request.body.reason,
+          status: detail.status,
+          quorum_satisfied: false,
+          mission_effect: null,
+          created_at: detail.created_at,
+        });
+      },
+    ).as("supersede");
   });
 
   function openRequest() {
@@ -135,6 +180,45 @@ describe("Mission decisions — mocked API", () => {
     cy.contains("button", "Launch habitat").click();
     cy.get('[data-testid="approval-list-row"]').click();
     cy.wait("@detail");
+  }
+
+  for (const [width, height] of [
+    [1440, 1000],
+    [390, 844],
+  ]) {
+    it(`change decision at ${width}px: cancel, sequential successors and terminal lock`, () => {
+      cy.viewport(width, height);
+      openRequest();
+      cy.contains("button", /^Approve$/).click();
+      cy.contains("button", "Confirm approve").click();
+      cy.wait("@decision");
+      cy.contains("button", "Change decision").should("be.enabled").click();
+      cy.get('[role="dialog"]').should(
+        "contain.text",
+        "Previous decision: approve · d1",
+      );
+      cy.get("textarea").should("have.focus").type("{esc}");
+      cy.then(() => expect(writes).to.eq(1));
+      cy.contains("button", "Change decision").click();
+      cy.get("textarea").type("Updated reason");
+      cy.screenshot(`checkpoint-d-change-${width}`, { capture: "viewport" });
+      cy.contains("button", "Confirm approve").click();
+      cy.wait("@supersede")
+        .its("request.body.supersedes_decision_id")
+        .should("eq", "d1");
+      cy.contains("button", "Change decision").should("be.enabled").click();
+      cy.get('[role="dialog"]')
+        .should("contain.text", "approve · d2")
+        .and("contain.text", "Updated reason");
+      cy.get("select").select("reject");
+      cy.contains("button", "Confirm reject").click();
+      cy.wait("@supersede")
+        .its("request.body.supersedes_decision_id")
+        .should("eq", "d2");
+      cy.get('[data-testid="approval-status"]').should("have.text", "rejected");
+      cy.contains("button", "Change decision").should("not.exist");
+      cy.then(() => expect(writes).to.eq(3));
+    });
   }
 
   it("desktop: confirms a decision, preserves backend status, and hides initial actions afterward", () => {

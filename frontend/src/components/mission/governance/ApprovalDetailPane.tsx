@@ -7,7 +7,8 @@ import { Button } from "@/components/ui/button";
 import { formatTimestamp } from "@/lib/formatters";
 
 import { statusBadgeVariant } from "./governanceStatus";
-import { DecisionDialog } from "./DecisionDialog";
+import { DecisionDialog, type PriorDecision } from "./DecisionDialog";
+import { DECISION_FRESHNESS_MS } from "./decisionFreshness";
 import type { SelectedMissionCard } from "./types";
 import {
   matchesDecisionTarget,
@@ -24,13 +25,17 @@ export function ApprovalDetailPane({
   decisionController?: MissionDecisionController;
 }) {
   const [choice, setChoice] = useState<"approve" | "reject" | null>(null);
+  const [prior, setPrior] = useState<PriorDecision | undefined>(undefined);
   const query = useGetApprovalDetailApiV1MissionApprovalsRequestIdGet(
     selectedApprovalRequestId ?? "",
     {
       query: {
         enabled: selectedApprovalRequestId !== null,
         ...(decisionController
-          ? { refetchOnMount: "always" as const, staleTime: 15_000 }
+          ? {
+              refetchOnMount: "always" as const,
+              staleTime: DECISION_FRESHNESS_MS,
+            }
           : {}),
       },
     },
@@ -87,8 +92,7 @@ export function ApprovalDetailPane({
     !!target &&
     matchesDecisionTarget(detail, target) &&
     detail.status === "pending" &&
-    detail.can_decide &&
-    detail.current_principal_decision === null;
+    detail.can_decide;
   const fresh =
     !query.isError &&
     !query.isFetching &&
@@ -99,7 +103,17 @@ export function ApprovalDetailPane({
     !!decisionController?.signedIn &&
     eligible &&
     fresh &&
-    (!operation || operation.phase === "rejected");
+    !!target &&
+    !!decisionController?.canDecide(
+      target,
+      choice
+        ? prior?.decision_id
+        : detail.current_principal_decision?.decision_id,
+    );
+  const draftChanged =
+    !!choice &&
+    (prior?.decision_id ?? null) !==
+      (detail.current_principal_decision?.decision_id ?? null);
 
   return (
     <article
@@ -287,7 +301,8 @@ export function ApprovalDetailPane({
             role={
               operation.phase === "uncertain" ||
               operation.phase === "rejected" ||
-              operation.refreshFailed
+              operation.refreshFailed ||
+              operation.decisionMismatch
                 ? "alert"
                 : "status"
             }
@@ -300,6 +315,11 @@ export function ApprovalDetailPane({
                 Submitted decision: {operation.data.decision}
               </p>
               <p>Reason: {operation.data.reason ?? "No reason provided"}</p>
+              {operation.mode === "supersede" ? (
+                <p>
+                  Replacing decision: {operation.data.supersedes_decision_id}
+                </p>
+              ) : null}
               <Button
                 className="mt-2"
                 variant="outline"
@@ -326,34 +346,72 @@ export function ApprovalDetailPane({
       ) : null}
       {eligible &&
       decisionController &&
-      (!operation || operation.phase === "rejected") ? (
+      (!operation ||
+        operation.phase === "rejected" ||
+        operation.phase === "recorded") ? (
         <div className="flex gap-2">
-          <Button disabled={!canConfirm} onClick={() => setChoice("approve")}>
-            Approve
-          </Button>
-          <Button
-            variant="outline"
-            disabled={!canConfirm}
-            onClick={() => setChoice("reject")}
-          >
-            Reject
-          </Button>
+          {detail.current_principal_decision ? (
+            <Button
+              disabled={!canConfirm}
+              onClick={() => {
+                const current = detail.current_principal_decision;
+                if (
+                  !current ||
+                  (current.decision !== "approve" &&
+                    current.decision !== "reject")
+                )
+                  return;
+                setPrior({ ...current });
+                setChoice(current.decision);
+              }}
+            >
+              Change decision
+            </Button>
+          ) : (
+            <>
+              <Button
+                disabled={!canConfirm}
+                onClick={() => {
+                  setPrior(undefined);
+                  setChoice("approve");
+                }}
+              >
+                Approve
+              </Button>
+              <Button
+                variant="outline"
+                disabled={!canConfirm}
+                onClick={() => {
+                  setPrior(undefined);
+                  setChoice("reject");
+                }}
+              >
+                Reject
+              </Button>
+            </>
+          )}
         </div>
       ) : null}
       {choice && target && decisionController ? (
         <DecisionDialog
           target={target}
           decision={choice}
+          priorDecision={prior}
+          onDecisionChange={setChoice}
           busy={busy}
           errorMessage={
-            operation?.phase === "rejected" ? operation.message : undefined
+            draftChanged
+              ? "The current decision has changed. Close this dialog, refresh details, and open it again."
+              : operation?.phase === "rejected"
+                ? operation.message
+                : undefined
           }
           canConfirm={canConfirm}
           onClose={() => setChoice(null)}
           onConfirm={(reason) => {
             if (!canConfirm) return;
             void decisionController
-              .confirm(target, choice, reason)
+              .confirm(target, choice, reason, prior?.decision_id)
               .then((phase) => {
                 if (phase === "recorded" || phase === "uncertain")
                   setChoice(null);

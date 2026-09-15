@@ -10,23 +10,41 @@ import {
   listApprovalsApiV1MissionApprovalsGet as readList,
   submitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPost as submitDecision,
   useSubmitApprovalDecisionApiV1MissionApprovalsRequestIdDecisionsPost as useSubmitDecision,
+  supersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePost as supersedeDecision,
+  useSupersedeApprovalDecisionApiV1MissionApprovalsRequestIdSupersedePost as useSupersedeDecision,
 } from "@/api/generated/mission-approvals/mission-approvals";
 import type {
   ApprovalDetailResponse,
   SubmitDecisionRequest,
+  SupersedeDecisionRequest,
 } from "@/api/generated/model";
 import { ApiError } from "@/api/mutator";
 import { useAuth } from "@/auth/clerk";
 import { getLocalAuthToken, isLocalAuthMode } from "@/auth/localAuth";
 import type { DecisionTarget } from "./DecisionDialog";
+import { DECISION_FRESHNESS_MS } from "./decisionFreshness";
 
-export interface DecisionOperation {
+export type DecisionOperation = {
   target: DecisionTarget;
-  data: SubmitDecisionRequest;
   key: string;
   phase: "sending" | "uncertain" | "rejected" | "refreshing" | "recorded";
   message: string;
   refreshFailed?: boolean;
+  acknowledgedDecisionId?: string;
+  decisionMismatch?: boolean;
+} & (
+  | { mode: "submit"; data: SubmitDecisionRequest }
+  | { mode: "supersede"; data: SupersedeDecisionRequest }
+);
+
+function recordedMessage(
+  operation: Pick<DecisionOperation, "refreshFailed" | "decisionMismatch">,
+) {
+  if (operation.decisionMismatch)
+    return "Decision recorded, but the current decision has changed. Reload the page before making another decision.";
+  return operation.refreshFailed
+    ? "Decision recorded; some information could not be refreshed."
+    : "Decision recorded.";
 }
 
 export function matchesDecisionTarget(
@@ -155,26 +173,42 @@ export function useMissionDecision() {
     setView({ context: expected, operations: operations.current });
   }
 
-  function canDecide(target: DecisionTarget) {
+  function canDecide(target: DecisionTarget, priorId?: string) {
     if (!sameSession()) return false;
     const current = operations.current[target.requestId];
-    if (current && current.phase !== "rejected") return false;
+    if (
+      current &&
+      (current.refreshFailed ||
+        current.decisionMismatch ||
+        (current.phase !== "rejected" && current.phase !== "recorded"))
+    )
+      return false;
     const query = client.getQueryState<{
       status: number;
       data: ApprovalDetailResponse;
     }>(detailKey(target.requestId));
     const detail = query?.data?.status === 200 ? query.data.data : null;
+    if (
+      current?.phase === "recorded" &&
+      (!current.acknowledgedDecisionId ||
+        detail?.current_principal_decision?.decision_id !==
+          current.acknowledgedDecisionId)
+    )
+      return false;
     return (
       !!detail &&
       query?.status === "success" &&
       query.fetchStatus === "idle" &&
       !query.isInvalidated &&
       query.dataUpdatedAt >= context.startedAt &&
-      Date.now() - query.dataUpdatedAt < 15_000 &&
+      Date.now() - query.dataUpdatedAt < DECISION_FRESHNESS_MS &&
       matchesDecisionTarget(detail, target) &&
       detail.status === "pending" &&
       detail.can_decide &&
-      detail.current_principal_decision === null
+      (priorId !== undefined
+        ? !!priorId &&
+          detail.current_principal_decision?.decision_id === priorId
+        : detail.current_principal_decision === null)
     );
   }
 
@@ -205,8 +239,36 @@ export function useMissionDecision() {
     },
   });
 
+  const supersedeMutation = useSupersedeDecision<unknown>({
+    mutation: {
+      retry: false,
+      mutationFn: async (variables) => {
+        const caller = callers.current.get(
+          variables.headers["Idempotency-Key"],
+        );
+        if (!caller || !sameSession(caller.context)) throw new SessionChanged();
+        const token = caller.context.local
+          ? getLocalAuthToken()
+          : await caller.getToken();
+        if (!token || !sameSession(caller.context)) throw new SessionChanged();
+        return supersedeDecision(
+          variables.requestId,
+          variables.data,
+          variables.headers,
+          {
+            headers: { Authorization: `Bearer ${token}` },
+          },
+        );
+      },
+    },
+  });
+
   async function reconcile(operation: DecisionOperation) {
-    if (!sameSession()) return true;
+    const failed = {
+      refreshFailed: true,
+      decisionMismatch: !!operation.decisionMismatch,
+    };
+    if (!sameSession()) return failed;
     const params = {
       mission_source_repo: operation.target.card.source_repo,
       mission_card_kind: operation.target.card.kind,
@@ -214,12 +276,12 @@ export function useMissionDecision() {
     };
     try {
       const token = context.local ? getLocalAuthToken() : await auth.getToken();
-      if (!token || !sameSession()) return true;
+      if (!token || !sameSession()) return failed;
       const keys = [detailKey(operation.target.requestId), listKey(params)];
       await Promise.all(
         keys.map((queryKey) => client.cancelQueries({ queryKey, exact: true })),
       );
-      if (!sameSession()) return true;
+      if (!sameSession()) return failed;
       await Promise.all(
         keys.map((queryKey) =>
           client.invalidateQueries({
@@ -229,7 +291,7 @@ export function useMissionDecision() {
           }),
         ),
       );
-      if (!sameSession()) return true;
+      if (!sameSession()) return failed;
       const results = await Promise.allSettled([
         client.fetchQuery({
           queryKey: detailKey(operation.target.requestId),
@@ -267,9 +329,20 @@ export function useMissionDecision() {
           },
         }),
       ]);
-      return results.some((result) => result.status === "rejected");
+      const read = results[0];
+      const decisionMismatch =
+        !!operation.decisionMismatch ||
+        (!!operation.acknowledgedDecisionId &&
+          read.status === "fulfilled" &&
+          read.value.status === 200 &&
+          read.value.data.current_principal_decision?.decision_id !==
+            operation.acknowledgedDecisionId);
+      return {
+        refreshFailed: results.some((result) => result.status === "rejected"),
+        decisionMismatch,
+      };
     } catch {
-      return true;
+      return failed;
     }
   }
 
@@ -278,11 +351,18 @@ export function useMissionDecision() {
     update({ ...operation, phase: "sending", message: "Sending decision…" });
     callers.current.set(operation.key, { context, getToken: auth.getToken });
     try {
-      const result = await mutation.mutateAsync({
-        requestId: operation.target.requestId,
-        data: operation.data,
-        headers: { "Idempotency-Key": operation.key },
-      });
+      const headers = { "Idempotency-Key": operation.key };
+      const result = await (operation.mode === "supersede"
+        ? supersedeMutation.mutateAsync({
+            requestId: operation.target.requestId,
+            data: operation.data,
+            headers,
+          })
+        : mutation.mutateAsync({
+            requestId: operation.target.requestId,
+            data: operation.data,
+            headers: { "Idempotency-Key": operation.key },
+          }));
       if (!sameSession()) return;
       if (
         result.status !== 200 ||
@@ -302,19 +382,21 @@ export function useMissionDecision() {
         result.data.decision !== operation.data.decision
       )
         throw new Error("Unconfirmed response");
-      update({
+      const acknowledged = {
         ...operation,
+        acknowledgedDecisionId: result.data.decision_id,
+      };
+      update({
+        ...acknowledged,
         phase: "refreshing",
         message: "Decision recorded. Refreshing information…",
       });
-      const refreshFailed = await reconcile(operation);
+      const reconciliation = await reconcile(acknowledged);
       update({
-        ...operation,
+        ...acknowledged,
         phase: "recorded",
-        refreshFailed,
-        message: refreshFailed
-          ? "Decision recorded; some information could not be refreshed."
-          : "Decision recorded.",
+        ...reconciliation,
+        message: recordedMessage(reconciliation),
       });
     } catch (error) {
       if (error instanceof SessionChanged || !sameSession()) return;
@@ -327,10 +409,16 @@ export function useMissionDecision() {
       ) {
         update({
           ...operation,
-          phase: "rejected",
+          phase: "refreshing",
           message: rejectionMessage(error),
         });
-        await reconcile(operation);
+        const reconciliation = await reconcile(operation);
+        update({
+          ...operation,
+          phase: "rejected",
+          ...reconciliation,
+          message: rejectionMessage(error),
+        });
       } else {
         update({
           ...operation,
@@ -348,15 +436,30 @@ export function useMissionDecision() {
     target: DecisionTarget,
     decision: "approve" | "reject",
     reason: string,
+    priorId?: string,
   ) {
-    if (!canDecide(target)) return;
+    if (!canDecide(target, priorId)) return;
+    const intent =
+      priorId !== undefined
+        ? {
+            mode: "supersede" as const,
+            data: {
+              supersedes_decision_id: priorId,
+              decision,
+              reason: reason === "" ? null : reason,
+            },
+          }
+        : {
+            mode: "submit" as const,
+            data: { decision, reason: reason === "" ? null : reason },
+          };
     let key: string;
     try {
       key = crypto.randomUUID();
     } catch {
       update({
         target,
-        data: { decision, reason: reason === "" ? null : reason },
+        ...intent,
         key: "",
         phase: "rejected",
         message:
@@ -366,7 +469,7 @@ export function useMissionDecision() {
     }
     const operation: DecisionOperation = {
       target: { ...target, card: { ...target.card } },
-      data: { decision, reason: reason === "" ? null : reason },
+      ...intent,
       key,
       phase: "sending",
       message: "Sending decision…",
@@ -393,15 +496,13 @@ export function useMissionDecision() {
     )
       return;
     update({ ...operation, phase: "refreshing" });
-    const refreshFailed = await reconcile(operation);
+    const reconciliation = await reconcile(operation);
     update({
       ...operation,
-      refreshFailed,
+      ...reconciliation,
       message:
         operation.phase === "recorded"
-          ? refreshFailed
-            ? "Decision recorded; some information could not be refreshed."
-            : "Decision recorded."
+          ? recordedMessage(reconciliation)
           : operation.message,
     });
   }

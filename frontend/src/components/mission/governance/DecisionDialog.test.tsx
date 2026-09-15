@@ -16,6 +16,36 @@ const target = {
 };
 
 describe("Decision confirmation", () => {
+  it("shows the immutable prior decision and lets the caller select a replacement", async () => {
+    const change = vi.fn();
+    const confirm = vi.fn();
+    render(
+      <DecisionDialog
+        target={target}
+        decision="approve"
+        canConfirm
+        priorDecision={{
+          decision_id: "prior-7",
+          decision: "approve",
+          reason: "Old reason",
+          created_at: "2026-09-12T00:00:00Z",
+        }}
+        onDecisionChange={change}
+        onConfirm={confirm}
+        onClose={vi.fn()}
+      />,
+    );
+    expect(screen.getByRole("dialog")).toHaveAccessibleName("Change decision");
+    expect(screen.getByText(/prior-7/)).toBeInTheDocument();
+    expect(screen.getByText(/Old reason/)).toBeInTheDocument();
+    expect(screen.getByRole("textbox")).toHaveValue("");
+    await userEvent.selectOptions(
+      screen.getByLabelText("New decision"),
+      "reject",
+    );
+    expect(change).toHaveBeenCalledWith("reject");
+    expect(confirm).not.toHaveBeenCalled();
+  });
   it.each(["approve", "reject"] as const)(
     "confirms %s only after an explicit click and preserves the reason",
     async (decision) => {
